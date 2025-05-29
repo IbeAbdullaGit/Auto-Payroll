@@ -223,7 +223,7 @@ class UniversalTimeCardProcessor:
         break_config = self.config.get('break_config', {})
         rules = break_config.get('break_rules', {})
         standard_minimum_hours = rules.get('minimum_hours_for_break', 6.0)
-        reduced_minimum_hours = 5.0  # Reduced minimum for 15-minute breaks
+        reduced_minimum_hours = 5.0  # Reduced minimum for 15-minute and 30-minute breaks
         
         # Use rounded net hours if provided (for final check), otherwise use gross hours
         hours_to_check = gross_hours
@@ -234,10 +234,10 @@ class UniversalTimeCardProcessor:
         employee_breaks = break_config.get('employee_breaks', {})
         if employee_name in employee_breaks:
             employee_break = employee_breaks[employee_name]
-            # If employee has 15-minute break, use reduced minimum hours (5 instead of 6)
-            if employee_break == 15:
+            # If employee has 15-minute or 30-minute break, use reduced minimum hours (5 instead of 6)
+            if employee_break in [15, 30]:
                 if hours_to_check >= reduced_minimum_hours:
-                    return 15
+                    return employee_break
                 else:
                     return 0
             # For other employee-specific break amounts, use standard minimum hours
@@ -251,10 +251,10 @@ class UniversalTimeCardProcessor:
         weekly_schedules = break_config.get('weekly_break_schedules', {})
         if employee_name in weekly_schedules:
             weekly_break = self.get_weekly_break_time(employee_name, date, weekly_schedules[employee_name])
-            # If weekly schedule specifies 15 minutes, use reduced minimum hours
-            if weekly_break == 15:
+            # If weekly schedule specifies 15 or 30 minutes, use reduced minimum hours
+            if weekly_break in [15, 30]:
                 if hours_to_check >= reduced_minimum_hours:
-                    return 15
+                    return weekly_break
                 else:
                     return 0
             # Otherwise, use standard minimum hours for other weekly break amounts
@@ -268,10 +268,10 @@ class UniversalTimeCardProcessor:
         day_specific = break_config.get('day_specific_breaks', {})
         if employee_name in day_specific:
             day_break = self.get_day_specific_break_time(employee_name, date, day_specific[employee_name])
-            # If day-specific schedule specifies 15 minutes, use reduced minimum hours
-            if day_break == 15:
+            # If day-specific schedule specifies 15 or 30 minutes, use reduced minimum hours
+            if day_break in [15, 30]:
                 if hours_to_check >= reduced_minimum_hours:
-                    return 15
+                    return day_break
                 else:
                     return 0
             # Otherwise, use standard minimum hours for other day-specific break amounts
@@ -593,10 +593,9 @@ class UniversalTimeCardProcessor:
                 'gross_hours': gross_hours,
                 'break_minutes': break_minutes,
                 'net_hours_rounded': net_hours_rounded,
-                'department': dept,
                 'daily_hours_from_pdf': daily_hours,
                 'notes': notes,
-                'is_complete': True
+                'is_complete': time_in != 'Missed' and time_out != 'Missed'
             }
             entries.append(entry)
             
@@ -862,8 +861,6 @@ class UniversalTimeCardProcessor:
                     'Gross_Hours': entry['gross_hours'],
                     'Break_Minutes': entry['break_minutes'],
                     'Net_Hours': entry['net_hours_rounded'],
-                    'Department': entry.get('department', ''),
-                    'Complete': 'Yes' if entry['is_complete'] else 'No',
                     'Notes': entry.get('notes', '')
                 })
         
