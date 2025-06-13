@@ -39,6 +39,9 @@ class UniversalTimeCardProcessor:
         self.output_base_dir = Path(self.config.get('output_directory', f'output_{self.company_name}'))
         self.output_base_dir.mkdir(exist_ok=True)
         
+        # Track the current input file for unique naming
+        self.current_input_file = None
+        
         # Set up logging first
         self.setup_logging()
         
@@ -55,13 +58,17 @@ class UniversalTimeCardProcessor:
         try:
             with open(notes_file, 'r') as f:
                 notes_data = json.load(f)
-            self.logger.info(f"Loaded {len(notes_data.get('notes', []))} notes for pay period: {notes_data.get('pay_period', 'Unknown')}")
-            return notes_data.get('notes', [])
+            notes = notes_data.get('notes', [])
+            self.notes = notes  # Update the instance variable
+            self.logger.info(f"Loaded {len(notes)} notes for pay period: {notes_data.get('pay_period', 'Unknown')}")
+            return notes
         except FileNotFoundError:
             self.logger.warning(f"Notes file not found: {notes_file}")
+            self.notes = []  # Ensure instance variable is set
             return []
         except Exception as e:
             self.logger.error(f"Error loading notes file: {e}")
+            self.notes = []  # Ensure instance variable is set
             return []
     
     def setup_logging(self):
@@ -71,7 +78,7 @@ class UniversalTimeCardProcessor:
         log_file.parent.mkdir(exist_ok=True)
         
         logging.basicConfig(
-            level=logging.WARNING,  # Only show warnings and errors
+            level=logging.INFO,  # Show info, warnings and errors
             format='%(asctime)s - %(levelname)s - %(message)s',
             handlers=[
                 logging.FileHandler(log_file),
@@ -174,16 +181,25 @@ class UniversalTimeCardProcessor:
         """Normalize date string for comparison."""
         try:
             # Handle different date formats
-            if '/' in date_str:
-                # Try M/D/YYYY format
-                parts = date_str.split('/')
+            if ',' in date_str:
+                # Extract M/D from "Day, M/D" format
+                date_part = date_str.split(', ')[1]
+            else:
+                date_part = date_str
+            
+            # Now handle M/D vs M/D/YYYY
+            if '/' in date_part:
+                parts = date_part.split('/')
                 if len(parts) == 3:
+                    # M/D/YYYY format - normalize and keep year
                     month, day, year = parts
                     return f"{int(month)}/{int(day)}/{year}"
-            # If it's already in "Day, M/D" format, extract the M/D part
-            if ',' in date_str:
-                return date_str.split(', ')[1]
-            return date_str
+                elif len(parts) == 2:
+                    # M/D format - normalize and add default year
+                    month, day = parts
+                    return f"{int(month)}/{int(day)}/2025"
+            
+            return date_part
         except:
             return date_str
     
@@ -205,12 +221,12 @@ class UniversalTimeCardProcessor:
                 final_break = note.get('value', calculated_break)
                 self.logger.info(f"Applied break override for {employee_name} on {date}: {calculated_break}min -> {final_break}min ({note_text})")
                 
-            elif note_type == 'time_override':
+            elif note_type == 'time_override' or note_type == 'missing_punch_override':
                 final_time_in = note.get('time_in', time_in)
                 final_time_out = note.get('time_out', time_out)
                 if 'break_minutes' in note:
                     final_break = note.get('break_minutes')
-                self.logger.info(f"Applied time override for {employee_name} on {date}: {time_in}-{time_out} -> {final_time_in}-{final_time_out} ({note_text})")
+                self.logger.info(f"Applied {note_type} for {employee_name} on {date}: {time_in}-{time_out} -> {final_time_in}-{final_time_out} ({note_text})")
                 
             elif note_type == 'sick_day':
                 self.logger.info(f"Sick day noted for {employee_name} on {date}: {note_text}")
@@ -219,7 +235,7 @@ class UniversalTimeCardProcessor:
         return final_time_in, final_time_out, final_break, combined_notes
     
     def calculate_break_time(self, employee_name: str, date: str, gross_hours: float, net_minutes_after_rounding: int = None) -> int:
-        """Calculate break time based on configuration."""
+        """Calculate break time based on configuration with support for escalating breaks."""
         break_config = self.config.get('break_config', {})
         rules = break_config.get('break_rules', {})
         standard_minimum_hours = rules.get('minimum_hours_for_break', 6.0)
@@ -230,10 +246,38 @@ class UniversalTimeCardProcessor:
         if net_minutes_after_rounding is not None:
             hours_to_check = max(gross_hours, net_minutes_after_rounding / 60)  # Use whichever is higher
         
-        # FIRST: Check for employee-specific breaks
+        # NEW: Check for escalating break schedules (30 min normally, 60 min if > 7 hours)
+        escalating_breaks = break_config.get('escalating_breaks', {})
+        if employee_name in escalating_breaks:
+            escalating_rule = escalating_breaks[employee_name]
+            
+            # Check each threshold in descending order (highest first)
+            thresholds = sorted(escalating_rule.get('thresholds', []), key=lambda x: x['hours'], reverse=True)
+            
+            for threshold in thresholds:
+                if hours_to_check >= threshold['hours']:
+                    return threshold['break_minutes']
+            
+            # If no threshold met, return 0
+            return 0
+        
+        # Check for individual employee hour thresholds (simple version)
+        employee_hour_thresholds = break_config.get('employee_hour_thresholds', {})
+        
+        # FIRST: Check for employee-specific breaks with custom thresholds
         employee_breaks = break_config.get('employee_breaks', {})
         if employee_name in employee_breaks:
             employee_break = employee_breaks[employee_name]
+            
+            # Check if this employee has a custom hour threshold
+            if employee_name in employee_hour_thresholds:
+                custom_threshold = employee_hour_thresholds[employee_name]
+                if hours_to_check >= custom_threshold:
+                    return employee_break
+                else:
+                    return 0
+            
+            # If no custom threshold, use standard logic
             # If employee has 15-minute or 30-minute break, use reduced minimum hours (5 instead of 6)
             if employee_break in [15, 30]:
                 if hours_to_check >= reduced_minimum_hours:
@@ -247,6 +291,7 @@ class UniversalTimeCardProcessor:
                 else:
                     return 0
         
+        # Rest of the method remains the same...
         # SECOND: Check for weekly break schedules
         weekly_schedules = break_config.get('weekly_break_schedules', {})
         if employee_name in weekly_schedules:
@@ -353,8 +398,40 @@ class UniversalTimeCardProcessor:
         try:
             # Apply note overrides FIRST
             final_time_in, final_time_out, override_break, notes = self.apply_note_overrides(
-                employee_name, date, time_in, time_out, 0
+                employee_name, date, time_in, time_out, -1  # Use -1 to indicate no override
             )
+            
+            # Check for fixed hours employees (before calculating from punch times)
+            break_config = self.config.get('break_config', {})
+            fixed_hours_employees = break_config.get('fixed_hours_employees', {})
+            
+            if employee_name in fixed_hours_employees:
+                # Check what types of notes exist for this date
+                notes_for_date = self.find_notes_for_employee_date(employee_name, date)
+                
+                # These override types bypass fixed hours and use actual timecard times
+                # sick_day still uses fixed hours
+                complete_override_types = ['time_override', 'missing_punch_override', 'break_override']
+                has_complete_override = any(note.get('type') in complete_override_types for note in notes_for_date)
+                
+                if not has_complete_override:
+                    # No overrides - use fixed hours
+                    fixed_hours = fixed_hours_employees[employee_name]
+                    
+                    # Simple fixed hours - no breaks
+                    break_minutes = 0
+                    net_hours_str = f"{int(fixed_hours)}:{int((fixed_hours % 1) * 60):02d}"
+                    gross_hours_str = net_hours_str  # Same as net since we ignore breaks
+                    
+                    # Add note about fixed hours
+                    if notes:
+                        notes += f"; Fixed {fixed_hours} hours"
+                    else:
+                        notes = f"Fixed {fixed_hours} hours"
+                        
+                    self.logger.info(f"Applied fixed hours for {employee_name}: {fixed_hours} hours (no overrides)")
+                    return net_hours_str, gross_hours_str, break_minutes, notes
+                # If there WAS any override, continue to normal processing below (overrides bypass fixed hours)
             
             # Parse AM/PM times (use overridden times)
             time_in_obj = datetime.strptime(final_time_in, "%I:%M %p")
@@ -369,8 +446,8 @@ class UniversalTimeCardProcessor:
             
             gross_hours = gross_minutes / 60
             
-            # Use override break if notes specified it
-            if override_break > 0:
+            # Use override break if notes specified it (including 0 minutes)
+            if override_break >= 0:  # -1 means no override, 0+ means override with specific value
                 break_minutes = override_break
             else:
                 # Check if gross time rounds up to break threshold
@@ -423,6 +500,9 @@ class UniversalTimeCardProcessor:
         
         if not file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
+        
+        # Store current input file for unique naming
+        self.current_input_file = file_path.stem  # filename without extension
         
         self.logger.info(f"Processing file: {file_path}")
         
@@ -534,10 +614,18 @@ class UniversalTimeCardProcessor:
             )
             employee['total_hours_net'] = self.minutes_to_time(total_net_minutes)
             
-            # Extract gross total from Pay Period Totals
-            gross_total_match = re.search(r'Pay Period Totals\s+(\d+:\d+)', data_section)
-            if gross_total_match:
-                employee['total_hours_gross'] = gross_total_match.group(1)
+            # Calculate total gross hours from daily entries
+            total_gross_minutes = sum(
+                self.time_to_minutes(entry['gross_hours']) 
+                for entry in time_entries
+            )
+            employee['total_hours_gross'] = self.minutes_to_time(total_gross_minutes)
+            
+            # If we couldn't calculate from entries, try extracting from PDF
+            if total_gross_minutes == 0:
+                gross_total_match = re.search(r'Pay Period Totals\s+(\d+:\d+)', data_section)
+                if gross_total_match:
+                    employee['total_hours_gross'] = gross_total_match.group(1)
             
             # Perform analysis
             employee['analysis'] = self.analyze_employee_data(employee)
@@ -566,36 +654,84 @@ class UniversalTimeCardProcessor:
         """Extract time entries from the new format."""
         entries = []
         
-        # Updated pattern for the new format
-        # Looks for: Day, date time_in time_out ... repeated time_in time_out department hours hours hours overtime total
-        pattern = r'(Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s*(\d+/\d+)\s+(\d+:\d+\s*[AP]M)\s+(\d+:\d+\s*[AP]M)\s+(\d+:\d+\s*[AP]M)\s+(\d+:\d+\s*[AP]M)\s+(\w+)\s+(\d+:\d+)'
+        # Simple approach: make AM/PM fully optional in the pattern
+        # This should catch the Wed, 5/28 case where it's "11:29" without AM
+        pattern = r'(Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s*(\d+/\d+)\s+(\d+:\d+(?:\s*[AP]M)?)\s+(\d+:\d+)(?:\s*[AP]M)?\s+(\d+:\d+(?:\s*[AP]M)?)\s+(\d+:\d+)(?:\s*[AP]M)?\s+(\w+)\s+(\d+:\d+)'
         
         matches = re.findall(pattern, text, re.MULTILINE)
         
         for match in matches:
             day, date, time_in_actual, time_out_actual, time_in_edited, time_out_edited, dept, daily_hours = match
             
+            # Fix incomplete times (missing AM/PM)
+            def fix_time_format(time_str, is_time_out=False, time_in_ref=""):
+                """Add AM/PM to time if missing, using smart logic."""
+                if 'AM' in time_str or 'PM' in time_str:
+                    return time_str.strip()
+                
+                time_str = time_str.strip()
+                hour = int(time_str.split(':')[0])
+                
+                if is_time_out:
+                    # For time_out, if it's afternoon hours (1-6 PM), it's likely PM
+                    if hour >= 1 and hour <= 6:
+                        return time_str + ' PM'
+                    elif hour >= 7 and hour <= 11:
+                        # Could be morning or evening, check context
+                        if 'AM' in time_in_ref:
+                            return time_str + ' AM'
+                        else:
+                            return time_str + ' PM'
+                    elif hour == 12:
+                        return time_str + ' PM'  # Noon
+                    else:
+                        return time_str + ' AM'
+                else:
+                    # For time_in, morning hours are typically AM
+                    if hour >= 6 and hour <= 11:
+                        return time_str + ' AM'
+                    elif hour == 12:
+                        return time_str + ' PM'  # Noon
+                    else:
+                        return time_str + ' AM'
+            
+            # Fix the times with smart logic
+            time_in_actual = fix_time_format(time_in_actual, False)
+            time_out_actual = fix_time_format(time_out_actual, True, time_in_actual)
+            time_in_edited = fix_time_format(time_in_edited, False)
+            time_out_edited = fix_time_format(time_out_edited, True, time_in_edited)
+            
             # Use the edited times for calculation (columns 3 and 4)
             time_in = time_in_edited
             time_out = time_out_edited
             
-            # Calculate net hours with breaks and rounding
+            # Apply note overrides FIRST to get the final times to display
+            final_time_in, final_time_out, override_break, override_notes = self.apply_note_overrides(
+                employee_name, f"{day}, {date}", time_in, time_out, -1
+            )
+            
+            # Calculate net hours with breaks and rounding using overridden times
             net_hours_rounded, gross_hours, break_minutes, notes = self.calculate_net_hours(
                 time_in, time_out, employee_name, f"{day}, {date}"
             )
+            
+            # Combine override notes with calculation notes
+            combined_notes = notes
+            if override_notes and notes != override_notes:
+                combined_notes = override_notes if not notes else f"{override_notes}; {notes}"
             
             entry = {
                 'date': f"{day}, {date}",
                 'day_of_week': day,
                 'date_only': date,
-                'time_in': time_in,
-                'time_out': time_out,
+                'time_in': final_time_in,  # Use overridden time for display
+                'time_out': final_time_out,  # Use overridden time for display
                 'gross_hours': gross_hours,
                 'break_minutes': break_minutes,
                 'net_hours_rounded': net_hours_rounded,
                 'daily_hours_from_pdf': daily_hours,
-                'notes': notes,
-                'is_complete': time_in != 'Missed' and time_out != 'Missed'
+                'notes': combined_notes,
+                'is_complete': final_time_in != 'Missed' and final_time_out != 'Missed'
             }
             entries.append(entry)
             
@@ -646,19 +782,29 @@ class UniversalTimeCardProcessor:
             time_out = str(row[columns['time_out']])
             date = str(row[columns['date']])
             
+            # Apply note overrides FIRST to get the final times to display
+            final_time_in, final_time_out, override_break, override_notes = self.apply_note_overrides(
+                employee_name, date, time_in, time_out, -1
+            )
+            
             net_hours_rounded, gross_hours, break_minutes, notes = self.calculate_net_hours(
                 time_in, time_out, employee_name, date
             )
             
+            # Combine override notes with calculation notes
+            combined_notes = notes
+            if override_notes and notes != override_notes:
+                combined_notes = override_notes if not notes else f"{override_notes}; {notes}"
+            
             employees[employee_name]['time_entries'].append({
                 'date': date,
-                'time_in': time_in,
-                'time_out': time_out,
+                'time_in': final_time_in,  # Use overridden time for display
+                'time_out': final_time_out,  # Use overridden time for display
                 'gross_hours': gross_hours,
                 'break_minutes': break_minutes,
                 'net_hours_rounded': net_hours_rounded,
-                'notes': notes,
-                'is_complete': time_in != 'Missed' and time_out != 'Missed'
+                'notes': combined_notes,
+                'is_complete': final_time_in != 'Missed' and final_time_out != 'Missed'
             })
         
         # Calculate totals and analyze
@@ -670,6 +816,13 @@ class UniversalTimeCardProcessor:
                 for entry in employee['time_entries']
             )
             employee['total_hours_net'] = self.minutes_to_time(total_net_minutes)
+            
+            # Calculate total gross hours
+            total_gross_minutes = sum(
+                self.time_to_minutes(entry['gross_hours']) 
+                for entry in employee['time_entries']
+            )
+            employee['total_hours_gross'] = self.minutes_to_time(total_gross_minutes)
             
             # Analyze
             employee['analysis'] = self.analyze_employee_data(employee)
@@ -713,19 +866,29 @@ class UniversalTimeCardProcessor:
                 if pd.isna(time_in) or pd.isna(time_out):
                     continue
                 
+                # Apply note overrides FIRST to get the final times to display
+                final_time_in, final_time_out, override_break, override_notes = self.apply_note_overrides(
+                    sheet_name, date, time_in, time_out, -1
+                )
+                
                 net_hours_rounded, gross_hours, break_minutes, notes = self.calculate_net_hours(
                     time_in, time_out, sheet_name, date
                 )
                 
+                # Combine override notes with calculation notes
+                combined_notes = notes
+                if override_notes and notes != override_notes:
+                    combined_notes = override_notes if not notes else f"{override_notes}; {notes}"
+                
                 employee['time_entries'].append({
                     'date': date,
-                    'time_in': time_in,
-                    'time_out': time_out,
+                    'time_in': final_time_in,  # Use overridden time for display
+                    'time_out': final_time_out,  # Use overridden time for display
                     'gross_hours': gross_hours,
                     'break_minutes': break_minutes,
                     'net_hours_rounded': net_hours_rounded,
-                    'notes': notes,
-                    'is_complete': time_in != 'Missed' and time_out != 'Missed'
+                    'notes': combined_notes,
+                    'is_complete': final_time_in != 'Missed' and final_time_out != 'Missed'
                 })
             
             # Calculate totals
@@ -734,6 +897,13 @@ class UniversalTimeCardProcessor:
                 for entry in employee['time_entries']
             )
             employee['total_hours_net'] = self.minutes_to_time(total_net_minutes)
+            
+            # Calculate total gross hours
+            total_gross_minutes = sum(
+                self.time_to_minutes(entry['gross_hours']) 
+                for entry in employee['time_entries']
+            )
+            employee['total_hours_gross'] = self.minutes_to_time(total_gross_minutes)
             
             # Analyze
             employee['analysis'] = self.analyze_employee_data(employee)
@@ -809,12 +979,26 @@ class UniversalTimeCardProcessor:
                     # Fallback to raw pay period with safe characters
                     pay_period = pay_period_raw.replace('/', '_').replace(' - ', '_to_')
         
-        # Use pay period in filename, fallback to timestamp if not available
+        # Create base filename with pay period and input file identifier
         if pay_period:
-            summary_path = self.output_base_dir / f"{self.company_name}_timecard_summary_{pay_period}.xlsx"
+            base_filename = f"{self.company_name}_timecard_summary_{pay_period}"
         else:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            summary_path = self.output_base_dir / f"{self.company_name}_timecard_summary_{timestamp}.xlsx"
+            base_filename = f"{self.company_name}_timecard_summary_{timestamp}"
+        
+        # Add input filename for additional uniqueness (if available)
+        if hasattr(self, 'current_input_file') and self.current_input_file:
+            # Only add if it's not already part of the filename
+            input_identifier = self.current_input_file.replace(' ', '_').replace('(', '').replace(')', '')
+            if input_identifier not in base_filename:
+                base_filename = f"{base_filename}_{input_identifier}"
+        
+        # Check if file already exists, add counter to make it unique
+        summary_path = self.output_base_dir / f"{base_filename}.xlsx"
+        counter = 1
+        while summary_path.exists():
+            summary_path = self.output_base_dir / f"{base_filename}_{counter}.xlsx"
+            counter += 1
         
         # Sort employees by first name and filter out those with 0 total net hours
         def get_first_name(employee_name: str) -> str:
