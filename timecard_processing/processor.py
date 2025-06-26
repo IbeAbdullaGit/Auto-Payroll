@@ -1009,6 +1009,16 @@ class UniversalTimeCardProcessor:
             else:
                 # Format: "First Last" -> return "First"
                 return employee_name.split()[0].strip()
+        
+        def format_name_first_last(employee_name: str) -> str:
+            """Convert 'Last, First' to 'First Last' format."""
+            if ', ' in employee_name:
+                # Format: "Last, First" -> "First Last"
+                last, first = employee_name.split(', ', 1)
+                return f"{first.strip()} {last.strip()}"
+            else:
+                # Already in "First Last" format
+                return employee_name
 
         # Filter out employees with 0 total net hours
         employees_with_hours = []
@@ -1026,9 +1036,12 @@ class UniversalTimeCardProcessor:
         for emp in employees_sorted:
             analysis = emp['analysis']
             
+            # Format name as First Last for display
+            formatted_name = format_name_first_last(emp['name'])
+            
             # Summary row for each employee
             summary_data.append({
-                'Employee': emp['name'],
+                'Employee': formatted_name,
                 'Total_Net_Hours': analysis['total_hours_net'],
                 'Total_Break_Hours': analysis['total_break_hours'],
                 'Pay_Period': emp.get('pay_period', '')
@@ -1037,7 +1050,7 @@ class UniversalTimeCardProcessor:
             # Detailed daily entries for each employee
             for entry in emp['time_entries']:
                 detailed_data.append({
-                    'Employee': emp['name'],
+                    'Employee': formatted_name,
                     'Date': entry['date'],
                     'Day': entry.get('day_of_week', ''),
                     'Time_In': entry['time_in'],
@@ -1052,11 +1065,20 @@ class UniversalTimeCardProcessor:
         with pd.ExcelWriter(summary_path, engine='openpyxl') as writer:
             # Summary sheet
             summary_df = pd.DataFrame(summary_data)
-            summary_df.to_excel(writer, sheet_name='Employee_Summary', index=False)
+            summary_df.to_excel(writer, sheet_name='Employee_Summary', index=False, startrow=2)
+            
+            # Add profile name header to summary sheet
+            workbook = writer.book
+            summary_worksheet = writer.sheets['Employee_Summary']
+            summary_worksheet['A1'] = self.company_name
             
             # Detailed daily entries sheet
             detailed_df = pd.DataFrame(detailed_data)
-            detailed_df.to_excel(writer, sheet_name='Daily_Details', index=False)
+            detailed_df.to_excel(writer, sheet_name='Daily_Details', index=False, startrow=2)
+            
+            # Add profile name header to detailed sheet
+            details_worksheet = writer.sheets['Daily_Details']
+            details_worksheet['A1'] = self.company_name
         
         self.logger.info(f"Created comprehensive summary: {summary_path}")
     

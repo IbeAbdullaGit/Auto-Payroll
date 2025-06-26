@@ -1,9 +1,9 @@
 # GUI Application Requirements
-tkinter # Usually comes with Python, but listed for completeness
 pandas>=1.3.0
 openpyxl>=3.0.0
 pdfplumber>=0.7.0
 PyPDF2>=3.0.0
+pyinstaller>=6.3.0  # For creating executable
 
 # Alternative if pdfplumber is not available
 # pypdf>=3.0.0 
