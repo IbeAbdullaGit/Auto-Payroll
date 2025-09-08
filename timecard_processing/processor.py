@@ -231,6 +231,12 @@ class UniversalTimeCardProcessor:
             elif note_type == 'sick_day':
                 self.logger.info(f"Sick day noted for {employee_name} on {date}: {note_text}")
                 
+            elif note_type == 'misc':
+                self.logger.info(f"Misc note for {employee_name} on {date}: {note_text}")
+                
+            elif note_type == 'roe':
+                self.logger.info(f"ROE note for {employee_name} on {date}: {note_text}")
+                
         combined_notes = "; ".join(applied_notes) if applied_notes else ""
         return final_time_in, final_time_out, final_break, combined_notes
     

@@ -1,18 +1,675 @@
 #!/usr/bin/env python3
 """
-GUI Application for Time Card Processing
-Provides user-friendly interface for managing profiles, notes, and processing time cards
+XELIFY - Modern Time Card Processing Application
+Transform your PDF documents into structured Excel spreadsheets with professional ease
 """
 
+import customtkinter as ctk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, scrolledtext
 import json
 import os
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 import subprocess
 import sys
 import re
+import time
+from typing import List, Dict, Any, Tuple
+
+# Set appearance mode and color theme
+ctk.set_appearance_mode("dark")  # Professional dark theme
+ctk.set_default_color_theme("blue")  # Professional blue theme
+
+class IntelligentNoteParser:
+    """Parse text notes and automatically identify key payroll terms and patterns."""
+    
+    def __init__(self, employee_list=None, profile_config=None):
+        # Store employee list for fuzzy matching
+        self.employee_list = employee_list or []
+        # Store profile config for break settings
+        self.profile_config = profile_config or {}
+        
+        # Define patterns for different note types
+        self.patterns = {
+            'missing_punch': [
+                r'missed.*punch',
+                r'missing.*punch',
+                r'missed.*day',
+                r'add.*day',
+                r'please add.*day',
+                r'add.*hours?',
+                r'please add.*hours?'
+            ],
+            'vacation_pay': [
+                r'vacation\s*pay',
+                r'use.*vacation',
+                r'vacation.*day',
+                r'vacation.*time'
+            ],
+            'roe': [
+                r'\broe\b',
+                r'record.*employment',
+                r'process.*roe',
+                r'quit.*last.*day',
+                r'illness.*last.*day'
+            ],
+            'time_change': [
+                r'\d{1,2}:\d{2}\s*[ap]m',
+                r'scheduled.*work',
+                r'worked.*\d+.*hour',
+                r'break.*\d+.*min',
+                r'no.*break',
+                r'over.*ratio'
+            ],
+            'sick_day': [
+                r'sick.*day',
+                r'illness',
+                r'away.*until',
+                r'off.*professional.*development'
+            ],
+            'benefits': [
+                r'benefits.*pay',
+                r'equivalent.*benefits'
+            ]
+        }
+        
+        # Time patterns
+        self.time_pattern = re.compile(r'(\d{1,2}):(\d{2})\s*([ap]m)', re.IGNORECASE)
+        self.date_pattern = re.compile(r'(\w{3}),?\s*(\d{1,2})/(\d{1,2})', re.IGNORECASE)
+        self.date_pattern2 = re.compile(r'(\w{3}),?\s*(\d{1,2})/(\d{1,2})/(\d{2,4})', re.IGNORECASE)
+        self.hour_pattern = re.compile(r'(\d+)\s*hours?', re.IGNORECASE)
+        
+        # Enhanced patterns for better name detection - more restrictive
+        self.name_with_context = re.compile(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(?:worked|add|missed|needs|scheduled)', re.IGNORECASE)
+        
+        # Employee name pattern (capitalized words)
+        self.name_pattern = re.compile(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b')
+    
+    def update_employee_list(self, employee_list):
+        """Update the employee list for fuzzy matching."""
+        self.employee_list = employee_list or []
+    
+    def update_profile_config(self, profile_config):
+        """Update the profile configuration for break settings."""
+        self.profile_config = profile_config or {}
+    
+    def get_employee_break_minutes(self, employee_name):
+        """Get the configured break minutes for an employee."""
+        if not self.profile_config or not employee_name:
+            return 30  # Default break if no config
+        
+        break_config = self.profile_config.get('break_config', {})
+        employee_breaks = break_config.get('employee_breaks', {})
+        
+        # Return configured break minutes, default to 30 if not found
+        return employee_breaks.get(employee_name, 30)
+    
+    def find_best_employee_match(self, detected_name):
+        """Find the best matching employee from the employee list."""
+        if not detected_name or not self.employee_list:
+            return detected_name
+        
+        detected_name = detected_name.strip()
+        
+        # First try exact match (case insensitive)
+        for emp in self.employee_list:
+            if emp.lower() == detected_name.lower():
+                return emp
+        
+        # Try partial matches with improved logic for "Last, First" format
+        best_match = None
+        best_score = 0
+        
+        for emp in self.employee_list:
+            emp_lower = emp.lower()
+            detected_lower = detected_name.lower()
+            
+            # Handle "Last, First" format - extract parts
+            if ',' in emp:
+                emp_parts = [part.strip() for part in emp.split(',')]
+                emp_last = emp_parts[0].lower() if emp_parts else ""
+                emp_first = emp_parts[1].lower() if len(emp_parts) > 1 else ""
+                # Also check all individual words in each part, including hyphenated names
+                all_name_words = []
+                for part in emp_parts:
+                    # Split by spaces and hyphens
+                    words = part.strip().lower().replace('-', ' ').split()
+                    all_name_words.extend(words)
+            else:
+                # Handle "First Last" format
+                emp_words = emp_lower.replace('-', ' ').split()
+                emp_first = emp_words[0] if emp_words else ""
+                emp_last = emp_words[-1] if len(emp_words) > 1 else ""
+                all_name_words = emp_words
+            
+            detected_words = detected_lower.split()
+            detected_first = detected_words[0] if detected_words else ""
+            detected_last = detected_words[-1] if len(detected_words) > 1 else ""
+            
+            # Check for first name match (most common case)
+            if emp_first and detected_first and emp_first == detected_first:
+                score = 0.9  # High score for first name match
+                if score > best_score:
+                    best_score = score
+                    best_match = emp
+                    continue  # Found exact first name match, move to next employee
+            
+            # Check for last name match
+            if emp_last and detected_last and emp_last == detected_last:
+                score = 0.8  # Good score for last name match
+                if score > best_score:
+                    best_score = score
+                    best_match = emp
+                    continue  # Found exact last name match, move to next employee
+            
+            # Check for exact word match in any part of the name (highest priority)
+            if detected_lower in all_name_words:
+                score = 0.95  # Very high score for exact word match
+                if score > best_score:
+                    best_score = score
+                    best_match = emp
+                    continue
+            
+            # Check for single name match (detected name matches first or last name exactly)
+            if emp_first and detected_lower == emp_first:
+                score = 0.9  # High score for exact first name match
+                if score > best_score:
+                    best_score = score
+                    best_match = emp
+                    continue
+            
+            if emp_last and detected_lower == emp_last:
+                score = 0.85  # High score for exact last name match
+                if score > best_score:
+                    best_score = score
+                    best_match = emp
+                    continue
+            
+            # Check if detected name is contained in employee name
+            if detected_lower in emp_lower:
+                score = len(detected_lower) / len(emp_lower)
+                if score > best_score:
+                    best_score = score
+                    best_match = emp
+            
+            # Check if any part of employee name is in detected name (less reliable)
+            elif emp_first and emp_first in detected_lower:
+                score = 0.6  # Moderate score for partial match
+                if score > best_score:
+                    best_score = score
+                    best_match = emp
+            
+            # Check if detected name is part of any name component (for names like "Denisse" in "Cabrera, Denisse Poblete")
+            elif detected_lower in emp_first or detected_lower in emp_last:
+                # Higher score for names that start with the detected name (likely nicknames)
+                if emp_first.startswith(detected_lower) or emp_last.startswith(detected_lower):
+                    score = 0.85  # High score for likely nicknames like "Dea" -> "Deanna"
+                else:
+                    score = 0.7  # Good score for name component match
+                if score > best_score:
+                    best_score = score
+                    best_match = emp
+        
+        # Return best match if score is reasonable, otherwise return original
+        return best_match if best_score > 0.5 else detected_name
+    
+    def find_best_employee_match_with_confidence(self, detected_name):
+        """Find the best matching employee and return both employee and confidence score."""
+        if not detected_name or not self.employee_list:
+            return detected_name, 0
+        
+        detected_name = detected_name.strip()
+        
+        # First try exact match (case insensitive)
+        for emp in self.employee_list:
+            if emp.lower() == detected_name.lower():
+                return emp, 1.0
+        
+        # Try partial matches with improved logic for "Last, First" format
+        best_match = None
+        best_score = 0
+        
+        for emp in self.employee_list:
+            emp_lower = emp.lower()
+            detected_lower = detected_name.lower()
+            
+            # Handle "Last, First" format - extract parts
+            if ',' in emp:
+                emp_parts = [part.strip() for part in emp.split(',')]
+                emp_last = emp_parts[0].lower() if emp_parts else ""
+                emp_first = emp_parts[1].lower() if len(emp_parts) > 1 else ""
+                # Also check all individual words in each part, including hyphenated names
+                all_name_words = []
+                for part in emp_parts:
+                    # Split by spaces and hyphens
+                    words = part.strip().lower().replace('-', ' ').split()
+                    all_name_words.extend(words)
+            else:
+                # Handle "First Last" format
+                emp_words = emp_lower.replace('-', ' ').split()
+                emp_first = emp_words[0] if emp_words else ""
+                emp_last = emp_words[-1] if len(emp_words) > 1 else ""
+                all_name_words = emp_words
+            
+            detected_words = detected_lower.split()
+            detected_first = detected_words[0] if detected_words else ""
+            detected_last = detected_words[-1] if len(detected_words) > 1 else ""
+            
+            # Check for exact word match in any part of the name (highest priority)
+            if detected_lower in all_name_words:
+                score = 0.95  # Very high score for exact word match
+                if score > best_score:
+                    best_score = score
+                    best_match = emp
+                    continue
+            
+            # Check for first name match (most common case)
+            if emp_first and detected_first and emp_first == detected_first:
+                score = 0.9  # High score for first name match
+                if score > best_score:
+                    best_score = score
+                    best_match = emp
+                    continue
+            
+            # Check for last name match
+            if emp_last and detected_last and emp_last == detected_last:
+                score = 0.8  # Good score for last name match
+                if score > best_score:
+                    best_score = score
+                    best_match = emp
+                    continue
+            
+            # Check for single name match (detected name matches first or last name exactly)
+            if emp_first and detected_lower == emp_first:
+                score = 0.9  # High score for exact first name match
+                if score > best_score:
+                    best_score = score
+                    best_match = emp
+                    continue
+            
+            if emp_last and detected_lower == emp_last:
+                score = 0.85  # High score for exact last name match
+                if score > best_score:
+                    best_score = score
+                    best_match = emp
+                    continue
+            
+            # Check for nickname matches first (higher priority than general substring)
+            if emp_first.startswith(detected_lower) or emp_last.startswith(detected_lower):
+                score = 0.85  # High score for likely nicknames like "Dea" -> "Deanna"
+                if score > best_score:
+                    best_score = score
+                    best_match = emp
+            
+            # Check if detected name is part of any name component (for names like "Denisse" in "Cabrera, Denisse Poblete")
+            elif detected_lower in emp_first or detected_lower in emp_last:
+                score = 0.7  # Good score for name component match
+                if score > best_score:
+                    best_score = score
+                    best_match = emp
+            
+            # Check if detected name is contained in employee name (lowest priority)
+            elif detected_lower in emp_lower:
+                score = len(detected_lower) / len(emp_lower)
+                if score > best_score:
+                    best_score = score
+                    best_match = emp
+        
+        # Return best match and confidence if score is reasonable
+        return (best_match, best_score) if best_score > 0.4 else (detected_name, 0)
+    
+    def parse_notes(self, text: str) -> List[Dict[str, Any]]:
+        """Parse text and extract structured notes."""
+        notes = []
+        lines = text.strip().split('\n')
+        
+        current_employee = None
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Try to extract employee name from line
+            employee = self.extract_employee_name(line)
+            if employee:
+                current_employee = employee
+            
+            # Extract notes for this line
+            line_notes = self.extract_notes_from_line(line, current_employee)
+            notes.extend(line_notes)
+        
+        return notes
+    
+    def extract_employee_name(self, line: str) -> str:
+        """Extract employee name by finding the best match against the employee list."""
+        # If we have an employee list, use word-scanning approach
+        if self.employee_list:
+            # Don't extract names from time/date lines that are ONLY time/date info
+            # Only skip if the line is primarily time/date content (e.g., "Tue, 8/19   08:00 AM-04:30 PM")
+            time_matches = len(re.findall(r'\d{1,2}:\d{2}\s*[AP]M', line))
+            date_matches = len(re.findall(r'\w{3},?\s*\d{1,2}/\d{1,2}', line))
+            total_words = len(line.split())
+            
+            # Only skip if more than 50% of the line is time/date content
+            if (time_matches + date_matches) > 0 and total_words <= 6 and (time_matches + date_matches) >= total_words // 2:
+                return None
+            
+            # Clean the line and get all words, handling possessives
+            words = line.replace(',', ' ').replace('-', ' ').replace('–', ' ').replace("'s", "").split()
+            
+            best_match = None
+            best_confidence = 0
+            
+            # First, try individual words (most common case)
+            for word in words:
+                # Skip very short words or obvious non-names
+                if len(word) < 3:
+                    continue
+                    
+                # Skip obvious non-names but be less aggressive
+                if word.lower() in ['the', 'and', 'but', 'for', 'off', 'a', 'an', 'is', 'was', 'were', 'are', 'be', 'been', 'have', 'has', 'had', 'will', 'would', 'could', 'should', 'may', 'might', 'can', 'must', 'this', 'that', 'with', 'from', 'only', 'last', 'day', 'week', 'year', 'time', 'total', 'paid', 'worked', 'please', 'issue', 'her', 'him', 'she', 'he']:
+                    continue
+                
+                # Skip numbers and dates
+                if re.match(r'^\d+$', word) or word.lower() in ['aug', 'sep', 'oct', 'nov', 'dec', 'jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'friday', 'monday', 'tuesday', 'wednesday', 'thursday', 'saturday', 'sunday']:
+                    continue
+                
+                # Only consider capitalized words as potential names
+                if not word[0].isupper():
+                    continue
+                
+                # Find best employee match for this candidate
+                matched_employee, confidence = self.find_best_employee_match_with_confidence(word)
+                
+                if confidence > best_confidence and confidence > 0.4:  # Minimum threshold
+                    best_match = matched_employee
+                    best_confidence = confidence
+            
+            # If single word didn't work, try 2-word combinations
+            if not best_match:
+                for i in range(len(words) - 1):
+                    candidate = f"{words[i]} {words[i + 1]}"
+                    
+                    # Skip if either word is too short or non-name
+                    if len(words[i]) < 3 or len(words[i + 1]) < 3:
+                        continue
+                    
+                    if not (words[i][0].isupper() and words[i + 1][0].isupper()):
+                        continue
+                    
+                    matched_employee, confidence = self.find_best_employee_match_with_confidence(candidate)
+                    
+                    if confidence > best_confidence and confidence > 0.4:
+                        best_match = matched_employee
+                        best_confidence = confidence
+            
+            # If we found a good match, return the matched employee name
+            if best_match and best_confidence > 0.4:
+                return best_match
+            
+            return None
+        
+        # Fallback to pattern-based extraction when no employee list is available
+        else:
+            # Look for patterns like "Name:" or "Name -" at the start of line
+            name_start_pattern = re.match(r'^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*[:\-]', line)
+            if name_start_pattern:
+                return name_start_pattern.group(1)
+            
+            # Look for names with context (more reliable)
+            words = line.split()
+            
+            # Pattern 1: "Name – action" or "Name - action" (name before dash) - HIGHEST PRIORITY
+            for i, word in enumerate(words):
+                if re.match(r'^[A-Z][a-z]+$', word) and i + 1 < len(words):
+                    next_word = words[i + 1]
+                    if next_word in ['-', '–']:
+                        return word
+            
+            # Pattern 2: "Please process Name" - find name between action words
+            for i, word in enumerate(words):
+                if word.lower() == 'process' and i + 1 < len(words):
+                    next_word = words[i + 1]
+                    if re.match(r'^[A-Z][a-z]+$', next_word):
+                        # Check if followed by another action/keyword
+                        if i + 2 < len(words):
+                            third_word = words[i + 2].lower()
+                            if third_word in ['vacation', 'roe', 'pay', 'sick', 'time']:
+                                return next_word
+                        return next_word
+            
+            # Pattern 3: Look for capitalized names at the beginning of sentences
+            first_words = line.split()[:4]  # Check first 4 words for longer names
+            for i, word in enumerate(first_words):
+                if re.match(r'^[A-Z][a-z]+$', word):
+                    # Check if next word is also capitalized (full name)
+                    if i + 1 < len(first_words) and re.match(r'^[A-Z][a-z]+$', first_words[i + 1]):
+                        return f"{word} {first_words[i + 1]}"
+                    # Single name if it's not a common word and has reasonable length
+                    elif (word.lower() not in ['please', 'process', 'add', 'the', 'for', 'and', 'or', 'but', 'this', 'that', 'with', 'from', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun', 'mon'] 
+                          and len(word) > 2):
+                        return word
+            
+            return None
+    
+    def extract_notes_from_line(self, line: str, employee: str = None) -> List[Dict[str, Any]]:
+        """Extract structured notes from a single line."""
+        notes = []
+        line_lower = line.lower()
+        
+        # Check for missing punch patterns
+        if any(re.search(pattern, line_lower) for pattern in self.patterns['missing_punch']):
+            note = self.create_missing_punch_note(line, employee)
+            if note:
+                notes.append(note)
+        
+        # Check for vacation pay patterns
+        elif any(re.search(pattern, line_lower) for pattern in self.patterns['vacation_pay']):
+            note = self.create_vacation_note(line, employee)
+            if note:
+                notes.append(note)
+        
+        # Check for ROE patterns
+        elif any(re.search(pattern, line_lower) for pattern in self.patterns['roe']):
+            note = self.create_roe_note(line, employee)
+            if note:
+                notes.append(note)
+        
+        # Check for time change patterns
+        elif any(re.search(pattern, line_lower) for pattern in self.patterns['time_change']):
+            time_notes = self.create_time_change_notes(line, employee)
+            notes.extend(time_notes)
+        
+        # Check for sick day patterns
+        elif any(re.search(pattern, line_lower) for pattern in self.patterns['sick_day']):
+            note = self.create_sick_day_note(line, employee)
+            if note:
+                notes.append(note)
+        
+        # If no specific pattern matches, create a misc note
+        else:
+            if employee:
+                note = {
+                    'employee': employee,
+                    'type': 'Misc',
+                    'note': line,
+                    'confidence': 0.3
+                }
+                notes.append(note)
+        
+        return notes
+    
+    def create_missing_punch_note(self, line: str, employee: str) -> Dict[str, Any]:
+        """Create a missing punch note."""
+        hours = self.extract_hours(line)
+        detected_employee = employee or self.extract_employee_name(line) or "Unknown"
+        matched_employee = self.find_best_employee_match(detected_employee)
+        
+        # Create better details based on the content
+        details = "Missing punch"
+        if hours:
+            details = f"Add {hours} hours"
+        elif 'day' in line.lower():
+            details = "Add full day"
+        elif 'punch' in line.lower():
+            details = "Missing punch correction"
+        
+        note = {
+            'employee': matched_employee,
+            'type': 'Missing Punch',
+            'note': line,
+            'confidence': 0.9,
+            'details': details
+        }
+        
+        if hours:
+            note['suggested_hours'] = hours
+            
+            # Auto-calculate time slots for hours ≤ 8
+            if hours <= 8:
+                # Calculate end time: 9 AM + hours = end time
+                start_hour = 9  # 9 AM
+                end_hour = start_hour + hours
+                
+                # Handle time formatting
+                if end_hour <= 12:
+                    time_out = f"{end_hour}:00 AM"
+                else:
+                    time_out = f"{end_hour - 12}:00 PM"
+                
+                note.update({
+                    'suggested_time_in': "9:00 AM",
+                    'suggested_time_out': time_out
+                })
+                
+                # Only add break if explicitly mentioned in the line
+                if 'break' in line.lower():
+                    break_match = re.search(r'(\d+)\s*min.*break', line.lower())
+                    if break_match:
+                        break_mins = int(break_match.group(1))
+                        note['suggested_break'] = break_mins
+                        details += f" (9:00 AM - {time_out}, {break_mins}min break)"
+                    else:
+                        # Generic break mention - use default
+                        default_break = self.get_employee_break_minutes(matched_employee)
+                        note['suggested_break'] = default_break
+                        details += f" (9:00 AM - {time_out}, {default_break}min break)"
+                else:
+                    # No break mentioned for "add hours" - don't calculate break
+                    details += f" (9:00 AM - {time_out})"
+                
+                note['details'] = details
+        
+        return note
+    
+    def create_vacation_note(self, line: str, employee: str) -> Dict[str, Any]:
+        """Create a vacation pay note."""
+        detected_employee = employee or self.extract_employee_name(line) or "Unknown"
+        matched_employee = self.find_best_employee_match(detected_employee)
+        
+        return {
+            'employee': matched_employee,
+            'type': 'Vacation Pay',
+            'note': line,
+            'confidence': 0.95,
+            'details': 'Vacation pay request'
+        }
+    
+    def create_roe_note(self, line: str, employee: str) -> Dict[str, Any]:
+        """Create an ROE note."""
+        detected_employee = employee or self.extract_employee_name(line) or "Unknown"
+        matched_employee = self.find_best_employee_match(detected_employee)
+        
+        return {
+            'employee': matched_employee,
+            'type': 'ROE',
+            'note': line,
+            'confidence': 0.9,
+            'details': 'ROE processing required'
+        }
+    
+    def create_time_change_notes(self, line: str, employee: str) -> List[Dict[str, Any]]:
+        """Create time change notes from a line with time information."""
+        notes = []
+        times = self.time_pattern.findall(line)
+        dates = self.date_pattern.findall(line)
+        
+        if times and len(times) >= 2:
+            # Has time in and time out
+            time_in = f"{times[0][0]}:{times[0][1]} {times[0][2].upper()}"
+            time_out = f"{times[1][0]}:{times[1][1]} {times[1][2].upper()}"
+            
+            detected_employee = employee or self.extract_employee_name(line) or "Unknown"
+            matched_employee = self.find_best_employee_match(detected_employee)
+            
+            # Get employee's configured break time
+            default_break = self.get_employee_break_minutes(matched_employee)
+            
+            # Create detailed description
+            details = f"{time_in} - {time_out}"
+            
+            note = {
+                'employee': matched_employee,
+                'type': 'Time Change',
+                'note': line,
+                'suggested_time_in': time_in,
+                'suggested_time_out': time_out,
+                'confidence': 0.85,
+                'details': details
+            }
+            
+            # Extract break information and update details
+            if 'no break' in line.lower():
+                note['suggested_break'] = 0
+                details += " (No break)"
+            elif 'break' in line.lower():
+                break_match = re.search(r'(\d+)\s*min.*break', line.lower())
+                if break_match:
+                    break_mins = int(break_match.group(1))
+                    note['suggested_break'] = break_mins
+                    details += f" ({break_mins}min break)"
+            else:
+                # Use employee's configured break time as default
+                note['suggested_break'] = default_break
+                details += f" ({default_break}min break - default)"
+            
+            # Update details with break info
+            note['details'] = details
+            
+            # Extract date if present
+            if dates:
+                note['suggested_date'] = f"{dates[0][1]}/{dates[0][2]}"
+            else:
+                # Try the other date pattern
+                dates2 = self.date_pattern2.findall(line)
+                if dates2:
+                    note['suggested_date'] = f"{dates2[0][1]}/{dates2[0][2]}/{dates2[0][3]}"
+            
+            notes.append(note)
+        
+        return notes
+    
+    def create_sick_day_note(self, line: str, employee: str) -> Dict[str, Any]:
+        """Create a sick day note."""
+        detected_employee = employee or self.extract_employee_name(line) or "Unknown"
+        matched_employee = self.find_best_employee_match(detected_employee)
+        
+        return {
+            'employee': matched_employee,
+            'type': 'Sick Day',
+            'note': line,
+            'confidence': 0.8,
+            'details': 'Sick day/absence'
+        }
+    
+    def extract_hours(self, text: str) -> int:
+        """Extract number of hours from text."""
+        match = self.hour_pattern.search(text)
+        if match:
+            return int(match.group(1))
+        return None
 
 # Import PDF processing capabilities
 try:
@@ -25,37 +682,28 @@ except ImportError:
     except ImportError:
         PDF_LIBRARY = None
 
-class TimeCardGUI:
+class XelifyGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("PDF to Excel Processor")
-        self.root.geometry("900x700")
-        self.root.configure(bg='#2c3e50')
+        self.root.title("XELIFY - Professional Time Card Processing")
+        self.root.geometry("1000x750")
         
-        # Configure ttk styles to reduce highlighting
-        self.style = ttk.Style()
-        # Configure a custom style for readonly comboboxes with reduced highlighting
-        self.style.map('Custom.TCombobox', 
-                      selectbackground=[('readonly', '')],
-                      selectforeground=[('readonly', 'black')],
-                      fieldbackground=[('readonly', 'white')],
-                      background=[('readonly', 'white')])
-        self.style.configure('Custom.TCombobox', 
-                           arrowcolor='black',
-                           selectbackground='white',
-                           selectforeground='black',
-                           highlightthickness=0,
-                           focuscolor='none')
+        # Show startup logo
+        self.show_startup_logo()
         
         # Initialize data
         self.current_profile = {}
         self.current_notes = {"pay_period": "", "notes": []}
-        self.batch_forms = []  # Initialize batch forms list
+        
+        # Initialize intelligent note parser
+        self.note_parser = IntelligentNoteParser()
+        self.batch_forms = []
         self.config_dir = Path("timecard_processing/configs")
         self.notes_dir = Path("timecard_processing/note_configs")
         self.config_dir.mkdir(exist_ok=True)
         self.notes_dir.mkdir(exist_ok=True)
-        # Create settings directory in user's AppData (Windows) or home directory (others)
+        
+        # Create settings directory
         if os.name == 'nt':  # Windows
             settings_dir = Path(os.environ.get('APPDATA', Path.home())) / 'TimeCardGUI'
         else:  # macOS/Linux
@@ -64,31 +712,101 @@ class TimeCardGUI:
         settings_dir.mkdir(exist_ok=True)
         self.settings_file = settings_dir / "settings.json"
         
+        # Initialize the main interface after startup
+        self.root.after(2000, self.initialize_main_interface)
+    
+    def show_startup_logo(self):
+        """Show XELIFY startup logo"""
+        # Create startup frame
+        self.startup_frame = ctk.CTkFrame(self.root)
+        self.startup_frame.pack(fill='both', expand=True, padx=20, pady=20)
+        
+        # XELIFY logo
+        logo_label = ctk.CTkLabel(
+            self.startup_frame, 
+            text="XELIFY", 
+            font=ctk.CTkFont(size=48, weight="bold")
+        )
+        logo_label.pack(pady=(150, 20))
+        
+        # Subtitle
+        subtitle_label = ctk.CTkLabel(
+            self.startup_frame, 
+            text="Professional Time Card Processing", 
+            font=ctk.CTkFont(size=16)
+        )
+        subtitle_label.pack(pady=(0, 40))
+        
+        # Loading indicator
+        self.loading_label = ctk.CTkLabel(
+            self.startup_frame, 
+            text="Loading...", 
+            font=ctk.CTkFont(size=12)
+        )
+        self.loading_label.pack(pady=10)
+        
+        # Progress bar
+        self.startup_progress = ctk.CTkProgressBar(self.startup_frame, width=300)
+        self.startup_progress.pack(pady=10)
+        self.startup_progress.set(0)
+        
+        # Start progress animation
+        self.animate_startup_progress()
+    
+    def animate_startup_progress(self):
+        """Animate the startup progress bar"""
+        for i in range(101):
+            self.root.after(i * 15, lambda progress=i/100: self.startup_progress.set(progress))
+            
+        # Update loading text
+        self.root.after(500, lambda: self.loading_label.configure(text="Initializing components..."))
+        self.root.after(1000, lambda: self.loading_label.configure(text="Loading profiles..."))
+        self.root.after(1500, lambda: self.loading_label.configure(text="Ready!"))
+    
+    def initialize_main_interface(self):
+        """Initialize the main interface after startup"""
+        # Remove startup frame
+        self.startup_frame.destroy()
+        
+        # Create main interface
         self.create_main_interface()
         self.load_existing_profiles()
         self.cleanup_old_settings()
         self.load_settings()
+        
+        # Initialize dropdowns with no profile loaded
+        self.update_employee_dropdown()
     
     def create_main_interface(self):
-        # Header
-        header_frame = tk.Frame(self.root, bg='#34495e', height=80)
-        header_frame.pack(fill='x', padx=0, pady=0)
+        """Create the main interface with modern styling"""
+        # Create main container
+        main_container = ctk.CTkFrame(self.root, corner_radius=0)
+        main_container.pack(fill='both', expand=True, padx=10, pady=10)
+        
+        # Create compact header
+        header_frame = ctk.CTkFrame(main_container, height=60, corner_radius=8)
+        header_frame.pack(fill='x', padx=10, pady=(10, 5))
         header_frame.pack_propagate(False)
         
-        title_label = tk.Label(header_frame, text="PDF to Excel Processor", 
-                              font=('Arial', 20, 'bold'), fg='white', bg='#34495e')
-        title_label.pack(pady=15)
+        # Compact title
+        title_label = ctk.CTkLabel(
+            header_frame, 
+            text="XELIFY", 
+            font=ctk.CTkFont(size=28, weight="bold")
+        )
+        title_label.pack(side='left', padx=20, pady=15)
         
-        subtitle_label = tk.Label(header_frame, text="Transform your PDF documents into structured Excel spreadsheets",
-                                 font=('Arial', 10), fg='#bdc3c7', bg='#34495e')
-        subtitle_label.pack()
+        # Status indicator
+        self.status_label = ctk.CTkLabel(
+            header_frame, 
+            text="Ready", 
+            font=ctk.CTkFont(size=12)
+        )
+        self.status_label.pack(side='right', padx=20, pady=15)
         
-        # Create notebook for tabs
-        self.notebook = ttk.Notebook(self.root)
-        self.notebook.pack(fill='both', expand=True, padx=10, pady=10)
-        
-        # Bind tab change event to remove focus
-        self.notebook.bind('<<NotebookTabChanged>>', self.on_tab_changed)
+        # Create tabview
+        self.tabview = ctk.CTkTabview(main_container, corner_radius=8)
+        self.tabview.pack(fill='both', expand=True, padx=10, pady=5)
         
         # Create tabs
         self.create_profiles_tab()
@@ -97,190 +815,234 @@ class TimeCardGUI:
         self.create_processing_tab()
     
     def create_profiles_tab(self):
-        # Profiles tab
-        profiles_frame = ttk.Frame(self.notebook)
-        self.notebook.add(profiles_frame, text='📁 Profiles')
+        # Create profiles tab
+        self.tabview.add("📁 Profiles")
+        profiles_frame = self.tabview.tab("📁 Profiles")
         
         # Profile Management section
-        profile_mgmt_frame = ttk.LabelFrame(profiles_frame, text="⚙️ Profile Management", padding=10)
+        profile_mgmt_frame = ctk.CTkFrame(profiles_frame, corner_radius=8)
         profile_mgmt_frame.pack(fill='x', padx=10, pady=10)
         
-        ttk.Label(profile_mgmt_frame, text="Current Profile:").grid(row=0, column=0, sticky='w', padx=5)
+        # Title label
+        title_label = ctk.CTkLabel(profile_mgmt_frame, text="Profile Management", 
+                                 font=ctk.CTkFont(size=16, weight="bold"))
+        title_label.pack(pady=(10, 5))
+        
+        # Profile controls container
+        controls_frame = ctk.CTkFrame(profile_mgmt_frame)
+        controls_frame.pack(fill='x', padx=10, pady=10)
+        
+        ctk.CTkLabel(controls_frame, text="Current Profile:").grid(row=0, column=0, sticky='w', padx=5, pady=5)
         self.profile_var = tk.StringVar()
-        self.profile_combo = ttk.Combobox(profile_mgmt_frame, textvariable=self.profile_var, 
-                                   values=[], width=25, state='readonly', style='Custom.TCombobox')
-        self.profile_combo.grid(row=0, column=1, padx=5)
+        self.profile_combo = ctk.CTkComboBox(controls_frame, variable=self.profile_var, 
+                                   values=[], width=200, state="readonly",
+                                   command=self.on_profile_change)
+        self.profile_combo.grid(row=0, column=1, padx=5, pady=5)
         
-        # Prevent text selection in combobox
-        self.profile_combo.bind('<Button-1>', lambda e: self.profile_combo.selection_clear())
-        self.profile_combo.bind('<FocusIn>', lambda e: self.profile_combo.selection_clear())
-        self.profile_combo.bind('<<ComboboxSelected>>', self.on_profile_change)
+        # Modern button styling
+        load_btn = ctk.CTkButton(controls_frame, text="Load", command=self.load_profile, width=80)
+        load_btn.grid(row=0, column=2, padx=5, pady=5)
         
-        load_btn = ttk.Button(profile_mgmt_frame, text="Load", command=self.load_profile)
-        load_btn.grid(row=0, column=2, padx=5)
+        edit_btn = ctk.CTkButton(controls_frame, text="Rename", command=self.edit_profile_name, width=80)
+        edit_btn.grid(row=0, column=3, padx=5, pady=5)
         
-        edit_btn = ttk.Button(profile_mgmt_frame, text="Edit Name", command=self.edit_profile_name)
-        edit_btn.grid(row=0, column=3, padx=5)
-        
-        delete_btn = ttk.Button(profile_mgmt_frame, text="Delete", command=self.delete_profile)
-        delete_btn.grid(row=0, column=4, padx=5)
+        delete_btn = ctk.CTkButton(controls_frame, text="Delete", command=self.delete_profile, 
+                                 width=80, fg_color="darkred", hover_color="red")
+        delete_btn.grid(row=0, column=4, padx=5, pady=5)
         
         # Create New Profile section
-        new_profile_frame = ttk.LabelFrame(profiles_frame, text="⚙️ Create New Profile", padding=10)
+        new_profile_frame = ctk.CTkFrame(profiles_frame, corner_radius=8)
         new_profile_frame.pack(fill='x', padx=10, pady=10)
         
-        ttk.Label(new_profile_frame, text="Profile Name:").grid(row=0, column=0, sticky='w', padx=5, pady=2)
-        self.new_profile_name = tk.StringVar()
-        ttk.Entry(new_profile_frame, textvariable=self.new_profile_name, width=30).grid(row=0, column=1, padx=5, pady=2)
+        # Title label
+        title_label2 = ctk.CTkLabel(new_profile_frame, text="Create New Profile", 
+                                  font=ctk.CTkFont(size=16, weight="bold"))
+        title_label2.pack(pady=(10, 5))
         
-        create_btn = ttk.Button(new_profile_frame, text="Create Profile", command=self.create_new_profile)
-        create_btn.grid(row=0, column=2, padx=5, pady=2)
+        # New profile controls
+        new_controls_frame = ctk.CTkFrame(new_profile_frame)
+        new_controls_frame.pack(fill='x', padx=10, pady=10)
+        
+        ctk.CTkLabel(new_controls_frame, text="Profile Name:").grid(row=0, column=0, sticky='w', padx=5, pady=5)
+        self.new_profile_name = tk.StringVar()
+        ctk.CTkEntry(new_controls_frame, textvariable=self.new_profile_name, width=200).grid(row=0, column=1, padx=5, pady=5)
+        
+        create_btn = ctk.CTkButton(new_controls_frame, text="Create Profile", command=self.create_new_profile, 
+                                 width=120, fg_color="green", hover_color="darkgreen")
+        create_btn.grid(row=0, column=2, padx=5, pady=5)
         
         # PDF Analysis section
-        ttk.Label(new_profile_frame, text="Or analyze PDF to extract employees:").grid(row=1, column=0, columnspan=3, sticky='w', padx=5, pady=(10,2))
+        pdf_analysis_frame = ctk.CTkFrame(profiles_frame, corner_radius=8)
+        pdf_analysis_frame.pack(fill='x', padx=10, pady=10)
         
-        pdf_frame = ttk.Frame(new_profile_frame)
-        pdf_frame.grid(row=2, column=0, columnspan=3, sticky='ew', padx=5, pady=2)
+        # Title label
+        title_label3 = ctk.CTkLabel(pdf_analysis_frame, text="PDF Analysis", 
+                                  font=ctk.CTkFont(size=16, weight="bold"))
+        title_label3.pack(pady=(10, 5))
         
-        self.selected_pdf_label = ttk.Label(pdf_frame, text="No PDF selected", foreground='gray')
-        self.selected_pdf_label.grid(row=0, column=0, sticky='w', padx=5)
+        ctk.CTkLabel(pdf_analysis_frame, text="Analyze PDF to extract employee names automatically").pack(pady=5)
         
-        browse_pdf_btn = ttk.Button(pdf_frame, text="Browse PDF", command=self.browse_pdf_for_profile)
-        browse_pdf_btn.grid(row=0, column=1, padx=5)
+        # PDF controls
+        pdf_controls_frame = ctk.CTkFrame(pdf_analysis_frame)
+        pdf_controls_frame.pack(fill='x', padx=10, pady=10)
         
-        analyze_btn = ttk.Button(pdf_frame, text="Analyze & Create Profile", command=self.analyze_pdf_and_create_profile)
-        analyze_btn.grid(row=0, column=2, padx=5)
+        self.selected_pdf_label = ctk.CTkLabel(pdf_controls_frame, text="No PDF selected", 
+                                             text_color="gray")
+        self.selected_pdf_label.pack(pady=5)
         
-        update_btn = ttk.Button(pdf_frame, text="Update Current Profile", command=self.update_profile_from_pdf)
-        update_btn.grid(row=0, column=3, padx=5)
+        # PDF buttons
+        pdf_buttons_frame = ctk.CTkFrame(pdf_controls_frame)
+        pdf_buttons_frame.pack(pady=10)
+        
+        browse_pdf_btn = ctk.CTkButton(pdf_buttons_frame, text="Browse PDF", 
+                                     command=self.browse_pdf_for_profile, width=120)
+        browse_pdf_btn.pack(side='left', padx=5)
+        
+        analyze_btn = ctk.CTkButton(pdf_buttons_frame, text="Analyze & Create", 
+                                  command=self.analyze_pdf_and_create_profile, width=120,
+                                  fg_color="orange", hover_color="darkorange")
+        analyze_btn.pack(side='left', padx=5)
+        
+        update_btn = ctk.CTkButton(pdf_buttons_frame, text="Update Current", 
+                                 command=self.update_profile_from_pdf, width=120)
+        update_btn.pack(side='left', padx=5)
         
         # Store selected PDF path
         self.selected_pdf_path = None
     
     def create_configuration_tab(self):
-        # Employees tab (renamed from Configuration)
-        config_frame = ttk.Frame(self.notebook)
-        self.notebook.add(config_frame, text='👥 Employees')
+        # Create employees tab
+        self.tabview.add("👥 Employees")
+        config_frame = self.tabview.tab("👥 Employees")
         
         # Create scrollable frame
-        canvas = tk.Canvas(config_frame)
-        scrollbar = ttk.Scrollbar(config_frame, orient="vertical", command=canvas.yview)
-        scrollable_frame = ttk.Frame(canvas)
-        
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
-        
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollable_frame = ctk.CTkScrollableFrame(config_frame, corner_radius=8)
+        scrollable_frame.pack(fill='both', expand=True, padx=10, pady=10)
         
         # Basic Settings
-        basic_frame = ttk.LabelFrame(scrollable_frame, text="Basic Settings", padding=10)
+        basic_frame = ctk.CTkFrame(scrollable_frame, corner_radius=8)
         basic_frame.pack(fill='x', padx=10, pady=5)
         
-        ttk.Label(basic_frame, text="Company Name:").grid(row=0, column=0, sticky='w', padx=5, pady=2)
-        self.company_name = tk.StringVar()
-        ttk.Entry(basic_frame, textvariable=self.company_name, width=30).grid(row=0, column=1, padx=5, pady=2)
+        basic_title = ctk.CTkLabel(basic_frame, text="Basic Settings", 
+                                 font=ctk.CTkFont(size=16, weight="bold"))
+        basic_title.pack(pady=(10, 5))
         
-        ttk.Label(basic_frame, text="Daily Hour Cap:").grid(row=1, column=0, sticky='w', padx=5, pady=2)
+        basic_controls = ctk.CTkFrame(basic_frame)
+        basic_controls.pack(fill='x', padx=10, pady=10)
+        
+        ctk.CTkLabel(basic_controls, text="Company Name:").grid(row=0, column=0, sticky='w', padx=5, pady=5)
+        self.company_name = tk.StringVar()
+        ctk.CTkEntry(basic_controls, textvariable=self.company_name, width=200).grid(row=0, column=1, padx=5, pady=5)
+        
+        ctk.CTkLabel(basic_controls, text="Daily Hour Cap:").grid(row=1, column=0, sticky='w', padx=5, pady=5)
         self.daily_cap = tk.StringVar(value="8.0")
-        ttk.Entry(basic_frame, textvariable=self.daily_cap, width=10).grid(row=1, column=1, sticky='w', padx=5, pady=2)
+        ctk.CTkEntry(basic_controls, textvariable=self.daily_cap, width=100).grid(row=1, column=1, sticky='w', padx=5, pady=5)
         
         # Employee Management
-        emp_frame = ttk.LabelFrame(scrollable_frame, text="Employee Settings", padding=10)
+        emp_frame = ctk.CTkFrame(scrollable_frame, corner_radius=8)
         emp_frame.pack(fill='x', padx=10, pady=5)
         
-        # Search functionality
-        search_frame = ttk.Frame(emp_frame)
-        search_frame.grid(row=0, column=0, columnspan=4, sticky='ew', padx=5, pady=2)
+        emp_title = ctk.CTkLabel(emp_frame, text="Employee Management", 
+                               font=ctk.CTkFont(size=16, weight="bold"))
+        emp_title.pack(pady=(10, 5))
         
-        ttk.Label(search_frame, text="Search:").grid(row=0, column=0, padx=5)
+        # Search functionality
+        search_frame = ctk.CTkFrame(emp_frame)
+        search_frame.pack(fill='x', padx=10, pady=5)
+        
+        ctk.CTkLabel(search_frame, text="Search:").grid(row=0, column=0, padx=5, pady=5)
         self.employee_search = tk.StringVar()
         self.employee_search.trace('w', self.filter_employees)
-        search_entry = ttk.Entry(search_frame, textvariable=self.employee_search, width=30)
-        search_entry.grid(row=0, column=1, padx=5)
+        search_entry = ctk.CTkEntry(search_frame, textvariable=self.employee_search, width=200)
+        search_entry.grid(row=0, column=1, padx=5, pady=5)
         
-        # Employee list
-        ttk.Label(emp_frame, text="Employees:").grid(row=1, column=0, sticky='nw', padx=5, pady=2)
+        # Employee list container
+        list_container = ctk.CTkFrame(emp_frame)
+        list_container.pack(fill='x', padx=10, pady=5)
         
-        emp_list_frame = ttk.Frame(emp_frame)
-        emp_list_frame.grid(row=1, column=1, columnspan=3, sticky='ew', padx=5, pady=2)
+        ctk.CTkLabel(list_container, text="Employees:").pack(anchor='w', padx=5, pady=5)
         
-        self.employee_listbox = tk.Listbox(emp_list_frame, height=6)
-        self.employee_listbox.pack(side='left', fill='both', expand=True)
+        # Employee list (using tkinter listbox within CTkFrame)
+        list_frame = ctk.CTkFrame(list_container)
+        list_frame.pack(fill='x', padx=5, pady=5)
         
-        emp_scroll = ttk.Scrollbar(emp_list_frame, orient="vertical", command=self.employee_listbox.yview)
-        emp_scroll.pack(side='right', fill='y')
-        self.employee_listbox.configure(yscrollcommand=emp_scroll.set)
+        self.employee_listbox = tk.Listbox(list_frame, height=6, bg='#2b2b2b', fg='white', 
+                                         selectbackground='#1f538d', borderwidth=0)
+        self.employee_listbox.pack(side='left', fill='both', expand=True, padx=5, pady=5)
         
         # Employee controls
-        emp_controls = ttk.Frame(emp_frame)
-        emp_controls.grid(row=2, column=1, columnspan=3, sticky='ew', padx=5, pady=5)
+        emp_controls = ctk.CTkFrame(emp_frame)
+        emp_controls.pack(fill='x', padx=10, pady=5)
         
-        ttk.Label(emp_controls, text="Employee Name:").grid(row=0, column=0, padx=5)
+        ctk.CTkLabel(emp_controls, text="Employee Name:").grid(row=0, column=0, padx=5, pady=5)
         self.new_employee_name = tk.StringVar()
-        ttk.Entry(emp_controls, textvariable=self.new_employee_name, width=25).grid(row=0, column=1, padx=5)
+        ctk.CTkEntry(emp_controls, textvariable=self.new_employee_name, width=200).grid(row=0, column=1, padx=5, pady=5)
         
-        ttk.Button(emp_controls, text="Add Employee", command=self.add_employee).grid(row=0, column=2, padx=5)
-        ttk.Button(emp_controls, text="Remove Selected", command=self.remove_employee).grid(row=0, column=3, padx=5)
+        ctk.CTkButton(emp_controls, text="Add Employee", command=self.add_employee, width=100,
+                    fg_color="green", hover_color="darkgreen").grid(row=0, column=2, padx=5, pady=5)
+        ctk.CTkButton(emp_controls, text="Remove Selected", command=self.remove_employee, width=120,
+                    fg_color="darkred", hover_color="red").grid(row=0, column=3, padx=5, pady=5)
         
         # Advanced Employee Settings
-        settings_frame = ttk.LabelFrame(emp_controls, text="Settings for Selected Employee", padding=5)
-        settings_frame.grid(row=1, column=0, columnspan=4, sticky='ew', pady=10)
+        settings_frame = ctk.CTkFrame(scrollable_frame, corner_radius=8)
+        settings_frame.pack(fill='x', padx=10, pady=5)
+        
+        settings_title = ctk.CTkLabel(settings_frame, text="Employee Settings", 
+                                    font=ctk.CTkFont(size=16, weight="bold"))
+        settings_title.pack(pady=(10, 5))
         
         # Basic break settings
-        basic_frame = ttk.Frame(settings_frame)
-        basic_frame.grid(row=0, column=0, columnspan=6, sticky='ew', pady=2)
+        basic_settings = ctk.CTkFrame(settings_frame)
+        basic_settings.pack(fill='x', padx=10, pady=5)
         
-        ttk.Label(basic_frame, text="Break Minutes:").grid(row=0, column=0, padx=5)
+        ctk.CTkLabel(basic_settings, text="Break Minutes:").grid(row=0, column=0, padx=5, pady=5)
         self.break_minutes = tk.StringVar()
-        ttk.Entry(basic_frame, textvariable=self.break_minutes, width=10).grid(row=0, column=1, padx=5)
+        ctk.CTkEntry(basic_settings, textvariable=self.break_minutes, width=100).grid(row=0, column=1, padx=5, pady=5)
         
-        ttk.Label(basic_frame, text="Hour Threshold:").grid(row=0, column=2, padx=5)
+        ctk.CTkLabel(basic_settings, text="Hour Threshold:").grid(row=0, column=2, padx=5, pady=5)
         self.hour_threshold = tk.StringVar()
-        ttk.Entry(basic_frame, textvariable=self.hour_threshold, width=10).grid(row=0, column=3, padx=5)
+        ctk.CTkEntry(basic_settings, textvariable=self.hour_threshold, width=100).grid(row=0, column=3, padx=5, pady=5)
         
         # Fixed hours setting
-        fixed_frame = ttk.Frame(basic_frame)
-        fixed_frame.grid(row=1, column=0, columnspan=6, sticky='ew', pady=2)
+        fixed_frame = ctk.CTkFrame(basic_settings)
+        fixed_frame.grid(row=1, column=0, columnspan=4, sticky='ew', pady=5)
         
         self.use_fixed_hours = tk.BooleanVar()
-        ttk.Checkbutton(fixed_frame, text="Use Fixed Hours:", variable=self.use_fixed_hours).grid(row=0, column=0, padx=5)
+        ctk.CTkCheckBox(fixed_frame, text="Use Fixed Hours:", variable=self.use_fixed_hours).grid(row=0, column=0, padx=5, pady=5)
         self.fixed_hours = tk.StringVar()
-        ttk.Entry(fixed_frame, textvariable=self.fixed_hours, width=10).grid(row=0, column=1, padx=5)
+        ctk.CTkEntry(fixed_frame, textvariable=self.fixed_hours, width=100).grid(row=0, column=1, padx=5, pady=5)
         
         # Escalating breaks
-        escalating_frame = ttk.LabelFrame(settings_frame, text="Escalating Breaks", padding=5)
-        escalating_frame.grid(row=1, column=0, columnspan=6, sticky='ew', pady=5)
+        escalating_frame = ctk.CTkFrame(settings_frame, corner_radius=8)
+        escalating_frame.pack(fill='x', padx=10, pady=5)
         
-        ttk.Label(escalating_frame, text="Use escalating breaks:").grid(row=0, column=0, padx=5)
+        ctk.CTkLabel(escalating_frame, text="Use escalating breaks:").grid(row=0, column=0, padx=5, pady=5)
         self.use_escalating = tk.BooleanVar()
-        ttk.Checkbutton(escalating_frame, variable=self.use_escalating, command=self.toggle_escalating_options).grid(row=0, column=1, padx=5)
+        ctk.CTkCheckBox(escalating_frame, text="", variable=self.use_escalating, command=self.toggle_escalating_options).grid(row=0, column=1, padx=5, pady=5)
         
         # Escalating break options (initially hidden)
-        self.escalating_options = ttk.Frame(escalating_frame)
-        self.escalating_options.grid(row=1, column=0, columnspan=6, sticky='ew', pady=5)
+        self.escalating_options = ctk.CTkFrame(escalating_frame, fg_color="transparent", height=30)
+        self.escalating_options.grid(row=1, column=0, columnspan=6, sticky='ew', pady=2)
         
-        ttk.Label(self.escalating_options, text="6+ hours:").grid(row=0, column=0, padx=5)
+        ctk.CTkLabel(self.escalating_options, text="6+ hours:").grid(row=0, column=0, padx=5, pady=2)
         self.break_6_hours = tk.StringVar(value="30")
-        ttk.Entry(self.escalating_options, textvariable=self.break_6_hours, width=8).grid(row=0, column=1, padx=5)
-        ttk.Label(self.escalating_options, text="min").grid(row=0, column=2, padx=2)
+        ctk.CTkEntry(self.escalating_options, textvariable=self.break_6_hours, width=80).grid(row=0, column=1, padx=5, pady=2)
+        ctk.CTkLabel(self.escalating_options, text="min").grid(row=0, column=2, padx=2, pady=2)
         
-        ttk.Label(self.escalating_options, text="7+ hours:").grid(row=0, column=3, padx=5)
+        ctk.CTkLabel(self.escalating_options, text="7+ hours:").grid(row=0, column=3, padx=5, pady=2)
         self.break_7_hours = tk.StringVar(value="60")
-        ttk.Entry(self.escalating_options, textvariable=self.break_7_hours, width=8).grid(row=0, column=4, padx=5)
-        ttk.Label(self.escalating_options, text="min").grid(row=0, column=5, padx=2)
+        ctk.CTkEntry(self.escalating_options, textvariable=self.break_7_hours, width=80).grid(row=0, column=4, padx=5, pady=2)
+        ctk.CTkLabel(self.escalating_options, text="min").grid(row=0, column=5, padx=2, pady=2)
         
         # Hide escalating options initially
         self.toggle_escalating_options()
         
-        ttk.Button(settings_frame, text="Apply Settings", command=self.apply_employee_settings).grid(row=2, column=0, columnspan=6, pady=10)
+        # Apply button
+        apply_frame = ctk.CTkFrame(settings_frame)
+        apply_frame.pack(fill='x', padx=10, pady=10)
         
-        # Note: Settings are automatically saved when "Apply Settings" is clicked
-        
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
+        ctk.CTkButton(apply_frame, text="Apply Settings", command=self.apply_employee_settings,
+                    width=150, fg_color="green", hover_color="darkgreen").pack(pady=10)
         
         # Bind employee selection (double-click to select and maintain selection)
         self.employee_listbox.bind('<Double-Button-1>', self.on_employee_select)
@@ -290,87 +1052,124 @@ class TimeCardGUI:
         self.selected_employee = None
     
     def create_notes_tab(self):
-        # Notes tab with scrolling
-        notes_tab = ttk.Frame(self.notebook)
-        self.notebook.add(notes_tab, text='📝 Notes')
+        # Create notes tab
+        self.tabview.add("📝 Notes")
+        notes_tab = self.tabview.tab("📝 Notes")
         
-        # Create scrollable canvas
-        self.notes_canvas = tk.Canvas(notes_tab)
-        scrollbar = ttk.Scrollbar(notes_tab, orient="vertical", command=self.notes_canvas.yview)
-        self.notes_frame = ttk.Frame(self.notes_canvas)
-        
-        # Store the configure callback for manual triggering
-        def update_scroll_region(event=None):
-            self.notes_canvas.configure(scrollregion=self.notes_canvas.bbox("all"))
-        
-        self.notes_frame.bind("<Configure>", update_scroll_region)
-        self.update_scroll_region = update_scroll_region  # Store reference
-        
-        self.notes_canvas.create_window((0, 0), window=self.notes_frame, anchor="nw")
-        self.notes_canvas.configure(yscrollcommand=scrollbar.set)
-        
-        self.notes_canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        
-        # Bind mousewheel to canvas
-        def _on_mousewheel(event):
-            self.notes_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        self.notes_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        # Use CTkScrollableFrame for easier scrolling
+        self.notes_frame = ctk.CTkScrollableFrame(notes_tab, corner_radius=8)
+        self.notes_frame.pack(fill='both', expand=True, padx=10, pady=10)
         
         # Pay period with period type selection
-        period_frame = ttk.LabelFrame(self.notes_frame, text="Pay Period", padding=10)
+        period_frame = ctk.CTkFrame(self.notes_frame, corner_radius=8)
         period_frame.pack(fill='x', padx=10, pady=5)
         
         # Period type selection
-        ttk.Label(period_frame, text="Period Type:").grid(row=0, column=0, padx=5)
+        ctk.CTkLabel(period_frame, text="Period Type:").grid(row=0, column=0, padx=5)
         self.period_type = tk.StringVar(value="2 weeks")
-        period_combo = ttk.Combobox(period_frame, textvariable=self.period_type, values=["2 weeks", "1 month"], width=10, state='readonly')
+        period_combo = ctk.CTkComboBox(period_frame, variable=self.period_type, values=["2 weeks", "1 month"], width=120, state='readonly',
+                                     command=self.update_pay_period_dates)
         period_combo.grid(row=0, column=1, padx=5)
-        period_combo.bind('<<ComboboxSelected>>', self.update_pay_period_dates)
         
-        ttk.Label(period_frame, text="Pay Period:").grid(row=0, column=2, sticky='w', padx=5)
+        ctk.CTkLabel(period_frame, text="Pay Period:").grid(row=0, column=2, sticky='w', padx=5)
         self.pay_period = tk.StringVar()
-        self.pay_period_combo = ttk.Combobox(period_frame, textvariable=self.pay_period, width=25, state='readonly')
+        self.pay_period_combo = ctk.CTkComboBox(period_frame, variable=self.pay_period, width=250, state='readonly',
+                                              command=lambda choice: self.update_available_dates_for_notes())
         self.pay_period_combo.grid(row=0, column=3, padx=5)
-        self.pay_period_combo.bind('<<ComboboxSelected>>', lambda e: self.update_available_dates_for_notes())
         
         # Initialize pay period options
         self.update_pay_period_dates()
         
+        # Smart Notes Input Section
+        smart_notes_frame = ctk.CTkFrame(self.notes_frame, corner_radius=8)
+        smart_notes_frame.pack(fill='x', padx=10, pady=5)
+        
+        # Smart notes title with icon
+        smart_title_frame = ctk.CTkFrame(smart_notes_frame, fg_color="transparent")
+        smart_title_frame.pack(fill='x', padx=10, pady=(10, 5))
+        
+        ctk.CTkLabel(smart_title_frame, text="🧠 Smart Notes Parser", 
+                    font=ctk.CTkFont(size=16, weight="bold")).pack(side='left')
+        
+        # Help button
+        help_btn = ctk.CTkButton(smart_title_frame, text="?", width=25, height=25,
+                                command=self.show_smart_notes_help)
+        help_btn.pack(side='right')
+        
+        # Text input area
+        text_input_frame = ctk.CTkFrame(smart_notes_frame, fg_color="transparent")
+        text_input_frame.pack(fill='both', expand=True, padx=10, pady=5)
+        
+        ctk.CTkLabel(text_input_frame, text="Paste your notes text here:").pack(anchor='w')
+        
+        self.smart_notes_text = ctk.CTkTextbox(text_input_frame, height=120)
+        self.smart_notes_text.pack(fill='both', expand=True, pady=(5, 10))
+        
+        # Add placeholder text
+        placeholder_text = "Example:\nAlina worked 72 hours this pay period\nKalli – Process ROE Quit last day worked was last day paid.\nShaveta may have missed a punch for a full day please add one day if she is missing"
+        self.smart_notes_text.insert("1.0", placeholder_text)
+        self.smart_notes_text.configure(text_color="gray")
+        
+        # Add focus handlers to manage placeholder
+        def on_focus_in(event):
+            if self.smart_notes_text.get("1.0", "end-1c") == placeholder_text:
+                self.smart_notes_text.delete("1.0", "end")
+                self.smart_notes_text.configure(text_color=("gray10", "#DCE4EE"))
+        
+        def on_focus_out(event):
+            if not self.smart_notes_text.get("1.0", "end-1c").strip():
+                self.smart_notes_text.insert("1.0", placeholder_text)
+                self.smart_notes_text.configure(text_color="gray")
+        
+        self.smart_notes_text.bind("<FocusIn>", on_focus_in)
+        self.smart_notes_text.bind("<FocusOut>", on_focus_out)
+        
+        # Smart notes controls
+        smart_controls_frame = ctk.CTkFrame(smart_notes_frame, fg_color="transparent")
+        smart_controls_frame.pack(fill='x', padx=10, pady=(0, 10))
+        
+        self.parse_btn = ctk.CTkButton(smart_controls_frame, text="🔍 Parse Notes", 
+                                      command=self.parse_smart_notes)
+        self.parse_btn.pack(side='left', padx=(0, 10))
+        
+        self.clear_text_btn = ctk.CTkButton(smart_controls_frame, text="Clear Text", 
+                                           command=lambda: self.smart_notes_text.delete("1.0", "end"))
+        self.clear_text_btn.pack(side='left')
+        
         # Add new note
-        add_note_frame = ttk.LabelFrame(self.notes_frame, text="Add New Note", padding=10)
+        add_note_frame = ctk.CTkFrame(self.notes_frame, corner_radius=8)
         add_note_frame.pack(fill='x', padx=10, pady=5)
         
         # Configure grid weights for consistent alignment
         add_note_frame.columnconfigure(1, weight=1)
         
         # Batch mode at the top
-        batch_control_frame = ttk.Frame(add_note_frame)
+        batch_control_frame = ctk.CTkFrame(add_note_frame, fg_color="transparent")
         batch_control_frame.grid(row=0, column=0, columnspan=3, sticky='ew', padx=5, pady=5)
         
         self.batch_mode = tk.BooleanVar()
-        self.batch_mode_checkbox = ttk.Checkbutton(batch_control_frame, text="Batch Mode:", 
+        self.batch_mode_checkbox = ctk.CTkCheckBox(batch_control_frame, text="Batch Mode:", 
                        variable=self.batch_mode, command=self.toggle_batch_mode, state='disabled')
         self.batch_mode_checkbox.grid(row=0, column=0, sticky='w', padx=5)
         
-        ttk.Label(batch_control_frame, text="Count:").grid(row=0, column=1, sticky='w', padx=5)
+        ctk.CTkLabel(batch_control_frame, text="Count:").grid(row=0, column=1, sticky='w', padx=5)
         self.batch_count = tk.StringVar(value="1")
-        self.batch_count_entry = ttk.Entry(batch_control_frame, textvariable=self.batch_count, width=5, state='disabled')
+        self.batch_count_entry = ctk.CTkEntry(batch_control_frame, textvariable=self.batch_count, width=5, state='disabled')
         self.batch_count_entry.grid(row=0, column=2, padx=5)
         self.batch_count_entry.bind('<KeyRelease>', self.on_batch_count_change)
         self.batch_count_entry.bind('<FocusOut>', self.on_batch_count_change)
         self.batch_count_entry.bind('<Return>', self.on_batch_count_change)
         
         # Employee selection
-        ttk.Label(add_note_frame, text="Employee:").grid(row=1, column=0, sticky='w', padx=5, pady=2)
+        ctk.CTkLabel(add_note_frame, text="Employee:").grid(row=1, column=0, sticky='w', padx=5, pady=2)
         self.note_employee = tk.StringVar()
-        self.employee_combo = ttk.Combobox(add_note_frame, textvariable=self.note_employee, 
-                                         width=30, style='Custom.TCombobox')
+        self.employee_combo = ctk.CTkComboBox(add_note_frame, variable=self.note_employee, 
+                                         width=300, state='normal')
         self.employee_combo.grid(row=1, column=1, sticky='w', padx=5, pady=2)
         
         # Add helpful instruction
-        instruction_label = ttk.Label(add_note_frame, text="(Type to search, ↓ or click arrow to open dropdown)", 
-                                    font=('Arial', 8), foreground='gray')
+        instruction_label = ctk.CTkLabel(add_note_frame, text="(Type to search, ↓ or click arrow to open dropdown)", 
+                                    font=ctk.CTkFont(size=10), text_color='gray')
         instruction_label.grid(row=1, column=2, sticky='w', padx=5, pady=2)
         
         # Add search functionality to employee combobox
@@ -385,105 +1184,120 @@ class TimeCardGUI:
         self.employee_combo.bind('<MouseWheel>', lambda e: 'break')
         
         # Date selection
-        ttk.Label(add_note_frame, text="Date:").grid(row=2, column=0, sticky='w', padx=5, pady=2)
+        ctk.CTkLabel(add_note_frame, text="Date:").grid(row=2, column=0, sticky='w', padx=5, pady=2)
         self.note_date = tk.StringVar()
-        self.date_combo = ttk.Combobox(add_note_frame, textvariable=self.note_date, 
-                                     width=20, state='readonly', style='Custom.TCombobox')
+        self.date_combo = ctk.CTkComboBox(add_note_frame, variable=self.note_date, 
+                                     width=200, state='readonly')
         self.date_combo.grid(row=2, column=1, sticky='w', padx=5, pady=2)
-        # Prevent text selection highlighting
-        self.date_combo.bind('<Button-1>', lambda e: self.date_combo.selection_clear())
-        self.date_combo.bind('<FocusIn>', lambda e: self.date_combo.selection_clear())
         # Disable scroll wheel to prevent accidental changes
         self.date_combo.bind('<MouseWheel>', lambda e: 'break')
         
         # Now that date_combo is created, update the available dates
         self.update_available_dates_for_notes()
         
+        # Initialize employee dropdown properly
+        self.update_employee_dropdown()
+        
         # Override type
-        ttk.Label(add_note_frame, text="Override Type:").grid(row=3, column=0, sticky='w', padx=5, pady=2)
-        self.note_type = tk.StringVar()
-        type_combo = ttk.Combobox(add_note_frame, textvariable=self.note_type, width=20, 
-                                state='readonly', style='Custom.TCombobox')
-        type_combo['values'] = ('Time Change', 'Break Change', 'Missing Punch', 'Sick Day')
+        ctk.CTkLabel(add_note_frame, text="Override Type:").grid(row=3, column=0, sticky='w', padx=5, pady=2)
+        self.note_type = tk.StringVar(value="Missing Punch")  # Set default value
+        type_combo = ctk.CTkComboBox(add_note_frame, variable=self.note_type, width=200, 
+                                state='readonly', values=('Time Change', 'Break Change', 'Missing Punch', 'Sick Day', 'Misc', 'ROE'),
+                                command=self.on_main_note_type_change)
         type_combo.grid(row=3, column=1, sticky='w', padx=5, pady=2)
-        type_combo.bind('<<ComboboxSelected>>', self.on_note_type_change)
-        # Prevent text selection highlighting
-        type_combo.bind('<Button-1>', lambda e: type_combo.selection_clear())
-        type_combo.bind('<FocusIn>', lambda e: type_combo.selection_clear())
         # Disable scroll wheel to prevent accidental changes
         type_combo.bind('<MouseWheel>', lambda e: 'break')
         
-        # Time fields (organized vertically for better alignment)
-        self.time_frame = ttk.Frame(add_note_frame)
-        self.time_frame.grid(row=4, column=0, columnspan=2, sticky='ew', pady=5)
+        # Time fields container (will show/hide based on override type)
+        self.time_fields_container = ctk.CTkFrame(add_note_frame, fg_color="transparent")
+        self.time_fields_container.grid(row=4, column=0, columnspan=2, sticky='ew', pady=5)
+        
+        # Full time frame for Time Change/Missing Punch
+        self.time_frame = ctk.CTkFrame(self.time_fields_container, fg_color="transparent", border_width=1, border_color="gray")
+        self.time_frame.grid(row=0, column=0, sticky='ew', padx=5, pady=5)
         
         # Time In
-        ttk.Label(self.time_frame, text="Time In:").grid(row=0, column=0, sticky='w', padx=5, pady=2)
-        time_in_frame = ttk.Frame(self.time_frame)
-        time_in_frame.grid(row=0, column=1, sticky='w', padx=5, pady=2)
+        self.time_in_label = ctk.CTkLabel(self.time_frame, text="Time In:")
+        self.time_in_label.grid(row=0, column=0, sticky='w', padx=5, pady=2)
+        self.time_in_frame = ctk.CTkFrame(self.time_frame, fg_color="transparent")
+        self.time_in_frame.grid(row=0, column=1, sticky='w', padx=5, pady=2)
         
         self.note_time_in_time = tk.StringVar(value="__:__")
-        time_in_entry = ttk.Entry(time_in_frame, textvariable=self.note_time_in_time, width=8)
+        time_in_entry = ctk.CTkEntry(self.time_in_frame, textvariable=self.note_time_in_time, width=80)
         time_in_entry.pack(side='left', padx=(0,2))
         time_in_entry.bind('<KeyPress>', lambda e: self.on_time_key_press(e, self.note_time_in_time))
         time_in_entry.bind('<FocusOut>', lambda e: self.on_time_focus_out_smart(self.note_time_in_time))
         time_in_entry.bind('<Button-1>', lambda e: self.on_time_click(e, self.note_time_in_time))
         
         self.note_time_in_ampm = tk.StringVar(value="AM")
-        time_in_ampm = ttk.Combobox(time_in_frame, textvariable=self.note_time_in_ampm, width=4, state='readonly')
-        time_in_ampm['values'] = ['AM', 'PM']
+        time_in_ampm = ctk.CTkComboBox(self.time_in_frame, variable=self.note_time_in_ampm, width=50, values=['AM', 'PM'], state='readonly',
+                                     command=lambda choice: self.root.after(100, self.calculate_note_total_hours))
         time_in_ampm.pack(side='left')
-        time_in_ampm.bind('<<ComboboxSelected>>', lambda e: self.root.after(100, self.calculate_note_total_hours))
         # Disable scroll wheel to prevent accidental changes
         time_in_ampm.bind('<MouseWheel>', lambda e: 'break')
         
         # Time Out
-        ttk.Label(self.time_frame, text="Time Out:").grid(row=1, column=0, sticky='w', padx=5, pady=2)
-        time_out_frame = ttk.Frame(self.time_frame)
-        time_out_frame.grid(row=1, column=1, sticky='w', padx=5, pady=2)
+        self.time_out_label = ctk.CTkLabel(self.time_frame, text="Time Out:")
+        self.time_out_label.grid(row=1, column=0, sticky='w', padx=5, pady=2)
+        self.time_out_frame = ctk.CTkFrame(self.time_frame, fg_color="transparent")
+        self.time_out_frame.grid(row=1, column=1, sticky='w', padx=5, pady=2)
         
         self.note_time_out_time = tk.StringVar(value="__:__")
-        time_out_entry = ttk.Entry(time_out_frame, textvariable=self.note_time_out_time, width=8)
+        time_out_entry = ctk.CTkEntry(self.time_out_frame, textvariable=self.note_time_out_time, width=80)
         time_out_entry.pack(side='left', padx=(0,2))
         time_out_entry.bind('<KeyPress>', lambda e: self.on_time_key_press(e, self.note_time_out_time))
         time_out_entry.bind('<FocusOut>', lambda e: self.on_time_focus_out_smart(self.note_time_out_time))
         time_out_entry.bind('<Button-1>', lambda e: self.on_time_click(e, self.note_time_out_time))
         
         self.note_time_out_ampm = tk.StringVar(value="PM")
-        time_out_ampm = ttk.Combobox(time_out_frame, textvariable=self.note_time_out_ampm, width=4, state='readonly')
-        time_out_ampm['values'] = ['AM', 'PM']
+        time_out_ampm = ctk.CTkComboBox(self.time_out_frame, variable=self.note_time_out_ampm, width=50, values=['AM', 'PM'], state='readonly',
+                                      command=lambda choice: self.root.after(100, self.calculate_note_total_hours))
         time_out_ampm.pack(side='left')
-        time_out_ampm.bind('<<ComboboxSelected>>', lambda e: self.root.after(100, self.calculate_note_total_hours))
         # Disable scroll wheel to prevent accidental changes
         time_out_ampm.bind('<MouseWheel>', lambda e: 'break')
         
-        # Break Minutes
-        ttk.Label(self.time_frame, text="Break Minutes:").grid(row=2, column=0, sticky='w', padx=5, pady=2)
+        # Break Minutes in main time frame
+        self.break_minutes_label = ctk.CTkLabel(self.time_frame, text="Break Minutes:")
+        self.break_minutes_label.grid(row=2, column=0, sticky='w', padx=5, pady=2)
         self.note_break_minutes = tk.StringVar()
-        ttk.Entry(self.time_frame, textvariable=self.note_break_minutes, width=8).grid(row=2, column=1, sticky='w', padx=5, pady=2)
+        self.break_minutes_entry = ctk.CTkEntry(self.time_frame, textvariable=self.note_break_minutes, width=80)
+        self.break_minutes_entry.grid(row=2, column=1, sticky='w', padx=5, pady=2)
         
         # Total Hours (calculated field)
-        ttk.Label(self.time_frame, text="Total Hours:").grid(row=3, column=0, sticky='w', padx=5, pady=2)
+        self.total_hours_label = ctk.CTkLabel(self.time_frame, text="Total Hours:")
+        self.total_hours_label.grid(row=3, column=0, sticky='w', padx=5, pady=2)
         self.note_total_hours = tk.StringVar()
-        total_hours_entry = ttk.Entry(self.time_frame, textvariable=self.note_total_hours, width=8, state='readonly')
-        total_hours_entry.grid(row=3, column=1, sticky='w', padx=5, pady=2)
+        self.total_hours_entry = ctk.CTkEntry(self.time_frame, textvariable=self.note_total_hours, width=80, state='readonly')
+        self.total_hours_entry.grid(row=3, column=1, sticky='w', padx=5, pady=2)
+        
+        # Configure the container's grid
+        self.time_fields_container.grid_columnconfigure(0, weight=1)
+        
+        # Break-only frame for Break Change (separate simple frame)
+        self.break_only_frame = ctk.CTkFrame(self.time_fields_container, fg_color="transparent", border_width=1, border_color="gray")
+        self.break_only_frame.grid(row=1, column=0, sticky='ew', padx=5, pady=5)
+        
+        self.break_only_label = ctk.CTkLabel(self.break_only_frame, text="Break Minutes:")
+        self.break_only_label.grid(row=0, column=0, sticky='w', padx=5, pady=2)
+        self.break_only_entry = ctk.CTkEntry(self.break_only_frame, textvariable=self.note_break_minutes, width=80)
+        self.break_only_entry.grid(row=0, column=1, sticky='w', padx=5, pady=2)
+        
+        # Initially hide both frames (no note type selected)
+        self.time_frame.grid_remove()
+        self.break_only_frame.grid_remove()
         
         # Note: Time calculation is now handled by KeyRelease and ComboboxSelected events
         
         # Note text
-        ttk.Label(add_note_frame, text="Note:").grid(row=5, column=0, sticky='nw', padx=5, pady=2)
+        ctk.CTkLabel(add_note_frame, text="Note:").grid(row=5, column=0, sticky='nw', padx=5, pady=2)
         self.note_text = tk.StringVar()
-        ttk.Entry(add_note_frame, textvariable=self.note_text, width=50).grid(row=5, column=1, sticky='ew', padx=5, pady=2)
+        ctk.CTkEntry(add_note_frame, textvariable=self.note_text, width=400).grid(row=5, column=1, sticky='ew', padx=5, pady=2)
         
-        self.add_note_button = ttk.Button(add_note_frame, text="Add Note", command=self.add_note)
+        self.add_note_button = ctk.CTkButton(add_note_frame, text="Add Note", command=self.add_note)
         self.add_note_button.grid(row=6, column=1, sticky='w', padx=5, pady=10)
         
-        # Container for batch forms (will be populated dynamically)
-        self.batch_forms_container = ttk.Frame(self.notes_frame)
-        self.batch_forms_container.pack(fill='x', padx=10, pady=5)
-        
         # Notes list
-        self.notes_list_frame = ttk.LabelFrame(self.notes_frame, text="Current Notes", padding=10)
+        self.notes_list_frame = ctk.CTkFrame(self.notes_frame, corner_radius=8)
         self.notes_list_frame.pack(fill='both', expand=True, padx=10, pady=5)
         
         # Create treeview for notes
@@ -501,71 +1315,108 @@ class TimeCardGUI:
         notes_scroll.pack(side="right", fill="y")
         
         # Notes controls
-        notes_controls = ttk.Frame(self.notes_list_frame)
+        notes_controls = ctk.CTkFrame(self.notes_list_frame)
         notes_controls.pack(fill='x', pady=5)
         
-        ttk.Button(notes_controls, text="Edit Selected", command=self.edit_note).pack(fill='x', pady=2)
-        ttk.Button(notes_controls, text="Remove Selected", command=self.remove_note).pack(fill='x', pady=2)
-        ttk.Button(notes_controls, text="Save Notes", command=self.save_notes).pack(fill='x', pady=2)
-        ttk.Button(notes_controls, text="Load Notes", command=self.load_notes).pack(fill='x', pady=2)
+        ctk.CTkButton(notes_controls, text="Edit Selected", command=self.edit_note).pack(fill='x', pady=2)
+        ctk.CTkButton(notes_controls, text="Remove Selected", command=self.remove_note).pack(fill='x', pady=2)
+        ctk.CTkButton(notes_controls, text="Save Notes", command=self.save_notes).pack(fill='x', pady=2)
+        ctk.CTkButton(notes_controls, text="Load Notes", command=self.load_notes).pack(fill='x', pady=2)
+        
+        # Container for batch forms (will be populated dynamically) - created but not packed
+        self.batch_forms_container = ctk.CTkFrame(self.notes_frame, fg_color="transparent")
+        
+        # Trigger the default note type change to show correct fields
+        self.on_note_type_change("Missing Punch")
     
     def create_processing_tab(self):
-        # Processing tab
-        processing_frame = ttk.Frame(self.notebook)
-        self.notebook.add(processing_frame, text='📊 Processing')
+        # Create processing tab
+        self.tabview.add("📊 Processing")
+        processing_frame = self.tabview.tab("📊 Processing")
         
-        # PDF Files section
-        pdf_frame = ttk.LabelFrame(processing_frame, text="📄 PDF Files", padding=20)
-        pdf_frame.pack(side='left', fill='both', expand=True, padx=10, pady=10)
+        # Main container with modern layout
+        main_container = ctk.CTkFrame(processing_frame, corner_radius=8)
+        main_container.pack(fill='both', expand=True, padx=10, pady=10)
         
-        # Upload area
-        upload_frame = ttk.Frame(pdf_frame)
-        upload_frame.pack(fill='x', pady=20)
+        # PDF File section (singular)
+        pdf_frame = ctk.CTkFrame(main_container, corner_radius=8)
+        pdf_frame.pack(side='left', fill='both', expand=True, padx=(10, 5), pady=10)
         
-        upload_label = ttk.Label(upload_frame, text="Click to upload PDF files\nor drag and drop files here", 
-                                font=('Arial', 10), anchor='center')
-        upload_label.pack(pady=20)
+        # Section title
+        pdf_title = ctk.CTkLabel(pdf_frame, text="PDF File", font=ctk.CTkFont(size=18, weight="bold"))
+        pdf_title.pack(pady=(15, 10))
         
-        # File list
-        self.file_listbox = tk.Listbox(pdf_frame, height=8)
-        self.file_listbox.pack(fill='both', expand=True, pady=10)
+        # Upload area with modern styling and proper drag/drop handling
+        upload_frame = ctk.CTkFrame(pdf_frame, corner_radius=8, fg_color="transparent", border_width=2, border_color="gray")
+        upload_frame.pack(fill='x', padx=15, pady=10)
         
-        # Control buttons
-        btn_frame = ttk.Frame(pdf_frame)
-        btn_frame.pack(fill='x', pady=10)
+        upload_label = ctk.CTkLabel(upload_frame, text="📎 Click to select a PDF file", 
+                                  font=ctk.CTkFont(size=14), cursor="hand2")
+        upload_label.pack(pady=30)
         
-        ttk.Button(btn_frame, text="Add Files", command=self.add_pdf_files).pack(side='left', padx=5)
-        ttk.Button(btn_frame, text="Remove Selected", command=self.remove_pdf_file).pack(side='left', padx=5)
-        ttk.Button(btn_frame, text="Clear All", command=self.clear_pdf_files).pack(side='left', padx=5)
+        # Selected file display
+        self.selected_file_label = ctk.CTkLabel(pdf_frame, text="No file selected", 
+                                              font=ctk.CTkFont(size=12), text_color="gray")
+        self.selected_file_label.pack(pady=10)
+        
+        # Control buttons with modern styling
+        btn_frame = ctk.CTkFrame(pdf_frame)
+        btn_frame.pack(fill='x', padx=15, pady=10)
+        
+        ctk.CTkButton(btn_frame, text="📁 Select File", command=self.select_pdf_file, width=120, 
+                    fg_color="green", hover_color="darkgreen").pack(side='left', padx=5)
+        ctk.CTkButton(btn_frame, text="🗑️ Clear", command=self.clear_pdf_file, width=100,
+                    fg_color="darkred", hover_color="red").pack(side='left', padx=5)
         
         # Processing Control section
-        control_frame = ttk.LabelFrame(processing_frame, text="🔧 Processing Control", padding=20)
-        control_frame.pack(side='right', fill='both', expand=True, padx=10, pady=10)
+        control_frame = ctk.CTkFrame(main_container, corner_radius=8)
+        control_frame.pack(side='right', fill='both', expand=True, padx=(5, 10), pady=10)
         
-        # Output location
-        ttk.Label(control_frame, text="Output Location:").pack(anchor='w', pady=5)
-        output_frame = ttk.Frame(control_frame)
-        output_frame.pack(fill='x', pady=5)
+        # Section title
+        control_title = ctk.CTkLabel(control_frame, text="Processing Control", font=ctk.CTkFont(size=18, weight="bold"))
+        control_title.pack(pady=(15, 20))
+        
+        # Output location with modern layout
+        output_section = ctk.CTkFrame(control_frame, corner_radius=8)
+        output_section.pack(fill='x', padx=15, pady=10)
+        
+        ctk.CTkLabel(output_section, text="Output Directory:", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor='w', padx=10, pady=(10, 5))
+        
+        output_frame = ctk.CTkFrame(output_section)
+        output_frame.pack(fill='x', padx=10, pady=(5, 15))
         
         self.output_path = tk.StringVar()
-        ttk.Entry(output_frame, textvariable=self.output_path, width=30).pack(side='left', fill='x', expand=True)
-        ttk.Button(output_frame, text="Browse", command=self.browse_output).pack(side='right', padx=(5,0))
+        ctk.CTkEntry(output_frame, textvariable=self.output_path, height=35).pack(side='left', fill='x', expand=True, padx=(5, 5))
+        ctk.CTkButton(output_frame, text="📂 Browse", command=self.browse_output, width=80).pack(side='right', padx=(5, 5))
         
-        # Processing progress
-        ttk.Label(control_frame, text="Processing Progress:").pack(anchor='w', pady=(20,5))
+        # Processing progress with modern styling
+        progress_section = ctk.CTkFrame(control_frame, corner_radius=8)
+        progress_section.pack(fill='x', padx=15, pady=10)
+        
+        ctk.CTkLabel(progress_section, text="Processing Status:", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor='w', padx=10, pady=(15, 5))
+        
         self.progress_var = tk.StringVar(value="Ready to process")
-        ttk.Label(control_frame, textvariable=self.progress_var).pack(anchor='w')
+        self.progress_label = ctk.CTkLabel(progress_section, textvariable=self.progress_var, font=ctk.CTkFont(size=12))
+        self.progress_label.pack(anchor='w', padx=10, pady=5)
         
-        self.progress_bar = ttk.Progressbar(control_frame, mode='determinate')
-        self.progress_bar.pack(fill='x', pady=5)
+        self.progress_bar = ctk.CTkProgressBar(progress_section, height=20)
+        self.progress_bar.pack(fill='x', padx=10, pady=(5, 15))
+        self.progress_bar.set(0)
         
-        # Process button
-        process_btn = ttk.Button(control_frame, text="🚀 Process PDFs to Excel", 
-                               command=self.process_files)
-        process_btn.pack(pady=20, fill='x')
+        # Process button with prominent styling
+        process_section = ctk.CTkFrame(control_frame, corner_radius=8)
+        process_section.pack(fill='x', padx=15, pady=20)
+        
+        process_btn = ctk.CTkButton(process_section, text="🚀 PROCESS FILE", 
+                                  command=self.process_files, height=50, font=ctk.CTkFont(size=16, weight="bold"),
+                                  fg_color="#1f538d", hover_color="#164069")
+        process_btn.pack(fill='x', padx=15, pady=15)
+        
+        # Store selected PDF file path
+        self.selected_pdf_file = None
         
         # Bind upload area click
-        upload_label.bind("<Button-1>", lambda e: self.add_pdf_files())
+        upload_label.bind("<Button-1>", lambda e: self.select_pdf_file())
     
     # Profile Management Methods
     def load_existing_profiles(self):
@@ -574,23 +1425,43 @@ class TimeCardGUI:
         if self.config_dir.exists():
             for config_file in self.config_dir.glob("*.json"):
                 profiles.append(config_file.stem)
-        self.profile_combo['values'] = profiles
+        self.profile_combo.configure(values=profiles)
         
         # Also update employee dropdown in notes
         if hasattr(self, 'note_employee_combo'):
             self.update_employee_dropdown()
     
-    def on_profile_change(self, event=None):
+    def on_profile_change(self, choice=None):
         """Handle profile selection change"""
-        # Reset all notes form fields when profile changes
-        self.reset_all_notes_fields()
+        profile_name = self.profile_var.get()
+        if not profile_name:
+            # If no profile selected, just reset fields
+            self.reset_all_notes_fields()
+            return
+        
+        # Load the selected profile automatically
+        config_file = self.config_dir / f"{profile_name}.json"
+        try:
+            with open(config_file, 'r') as f:
+                self.current_profile = json.load(f)
+            
+            # Reset all fields when profile changes
+            self.reset_all_notes_fields()
+            
+            # Update UI with loaded profile
+            self.update_configuration_ui()
+            self.update_employee_dropdown()
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load profile: {str(e)}")
+            self.reset_all_notes_fields()
     
     def reset_all_notes_fields(self):
         """Reset all notes form fields to default state"""
         # Reset main form
         self.note_employee.set("")
         self.note_date.set("")
-        self.note_type.set("")
+        self.note_type.set("Missing Punch")  # Set default override type
         self.note_text.set("")
         self.note_time_in_time.set("__:__")
         self.note_time_in_ampm.set("AM")
@@ -603,7 +1474,7 @@ class TimeCardGUI:
         self.clear_batch_forms()
         self.batch_mode.set(False)
         self.batch_count.set("1")
-        self.batch_count_entry.config(state='disabled')
+        self.batch_count_entry.configure(state='disabled')
         
         # Clear current notes
         self.current_notes = {"pay_period": "", "notes": []}
@@ -612,6 +1483,9 @@ class TimeCardGUI:
         # Clear the pay period dropdown
         if hasattr(self, 'pay_period'):
             self.pay_period.set("")
+            
+        # Update employee dropdown to show empty state
+        self.update_employee_dropdown()
     
     def load_profile(self):
         """Load selected profile"""
@@ -704,6 +1578,7 @@ class TimeCardGUI:
                 self.profile_var.set("")
                 self.current_profile = {}
                 self.update_configuration_ui()
+                self.update_employee_dropdown()  # Clear employee dropdown
                 messagebox.showinfo("Success", f"Profile '{profile_name}' deleted successfully")
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to delete profile: {str(e)}")
@@ -802,7 +1677,7 @@ class TimeCardGUI:
         if file_path:
             self.selected_pdf_path = file_path
             filename = Path(file_path).name
-            self.selected_pdf_label.config(text=f"Selected: {filename}", foreground='blue')
+            self.selected_pdf_label.configure(text=f"Selected: {filename}", text_color='blue')
     
     def analyze_pdf_and_create_profile(self):
         """Analyze PDF and create profile with extracted employee names"""
@@ -870,7 +1745,7 @@ class TimeCardGUI:
             self.update_employee_dropdown()
             self.new_profile_name.set("")
             self.selected_pdf_path = None
-            self.selected_pdf_label.config(text="No PDF selected", foreground='gray')
+            self.selected_pdf_label.configure(text="No PDF selected", text_color='gray')
             
             messagebox.showinfo("Success", 
                 f"Profile '{profile_name}' created successfully!\n\n"
@@ -917,7 +1792,7 @@ class TimeCardGUI:
             self.update_configuration_ui()
             self.update_employee_dropdown()
             self.selected_pdf_path = None
-            self.selected_pdf_label.config(text="No PDF selected", foreground='gray')
+            self.selected_pdf_label.configure(text="No PDF selected", text_color='gray')
             
             if new_employees:
                 messagebox.showinfo("Success", 
@@ -1017,6 +1892,11 @@ class TimeCardGUI:
     def update_employee_dropdown(self):
         """Update employee dropdown in notes tab"""
         if not self.current_profile:
+            # No profile loaded - clear dropdown completely
+            self.all_employees = []
+            if hasattr(self, 'employee_combo'):
+                self.employee_combo.configure(values=[])
+                self.employee_combo.set("")
             return
         
         break_config = self.current_profile.get('break_config', {})
@@ -1033,7 +1913,11 @@ class TimeCardGUI:
         
         # Update the employee dropdown
         if hasattr(self, 'employee_combo'):
-            self.employee_combo['values'] = self.all_employees
+            if self.all_employees:
+                self.employee_combo.configure(values=self.all_employees)
+            else:
+                self.employee_combo.configure(values=["No employees in profile"])
+                self.employee_combo.set("")
     
     # Employee Management Methods
     def filter_employees(self, *args):
@@ -1055,13 +1939,13 @@ class TimeCardGUI:
     def toggle_escalating_options(self):
         """Show/hide escalating break options"""
         if self.use_escalating.get():
-            # Show escalating options
+            # Show escalating options frame and its contents
+            self.escalating_options.grid()
             for widget in self.escalating_options.winfo_children():
                 widget.grid()
         else:
-            # Hide escalating options
-            for widget in self.escalating_options.winfo_children():
-                widget.grid_remove()
+            # Hide the entire escalating options frame
+            self.escalating_options.grid_remove()
     
     def prevent_deselection(self, event):
         """Prevent employee deselection and restore if needed"""
@@ -1274,45 +2158,81 @@ class TimeCardGUI:
     
     # Notes Methods
     
-    def update_pay_period_dates(self, event=None):
+    def update_pay_period_dates(self, choice=None):
         """Update pay period options based on selected period type"""
         from datetime import datetime, timedelta
         
-        period_type = self.period_type.get()
+        period_type = choice if choice else self.period_type.get()
         today = datetime.now()
-        
-        # Calculate the start of the current week (Monday)
-        current_week_start = today - timedelta(days=today.weekday())
         
         pay_periods = []
         
         if period_type == "2 weeks":
-            # Go back 2 weeks from start of current week for the default period
-            default_start = current_week_start - timedelta(days=14)
-            default_end = current_week_start - timedelta(days=1)  # End of previous week
+            # Calculate the current bi-weekly period using proper bi-weekly logic
+            # Using first Monday of the year as anchor date to align with desired periods
             
-            # Generate several 2-week periods going back
-            for i in range(6):  # Show 6 recent 2-week periods
-                start_date = default_start - timedelta(days=14 * i)
-                end_date = default_end - timedelta(days=14 * i)
+            # Set the anchor date (first Monday of current year)
+            jan_1 = datetime(today.year, 1, 1)
+            # Find the first Monday of the year
+            days_until_monday = (7 - jan_1.weekday()) % 7
+            if days_until_monday == 0 and jan_1.weekday() != 0:  # If Jan 1 is not Monday
+                days_until_monday = 7
+            anchor_date = jan_1 + timedelta(days=days_until_monday)
+            
+            # Calculate periods since anchor date
+            days_since_anchor = (today - anchor_date).days
+            periods_since_anchor = days_since_anchor // 14
+            
+            # Calculate the start of the current bi-weekly period
+            current_period_start = anchor_date + timedelta(days=periods_since_anchor * 14)
+            current_period_end = current_period_start + timedelta(days=13)  # 14 days total (0-13)
+            
+            # Add the current period as the first option
+            current_period_str = f"{current_period_start.strftime('%m/%d/%Y')} - {current_period_end.strftime('%m/%d/%Y')}"
+            pay_periods.append(current_period_str)
+            
+            # Generate previous 2-week periods going back
+            for i in range(1, 6):  # Show 5 previous periods plus current
+                start_date = current_period_start - timedelta(days=14 * i)
+                end_date = current_period_end - timedelta(days=14 * i)
                 period_str = f"{start_date.strftime('%m/%d/%Y')} - {end_date.strftime('%m/%d/%Y')}"
                 pay_periods.append(period_str)
         
         else:  # 1 month
-            # Go back 1 month from start of current week for the default period
-            default_start = current_week_start - timedelta(days=30)
-            default_end = current_week_start - timedelta(days=1)
+            # For monthly periods, use the current month as the first option
+            current_month_start = datetime(today.year, today.month, 1)
+            if today.month == 12:
+                next_month_start = datetime(today.year + 1, 1, 1)
+            else:
+                next_month_start = datetime(today.year, today.month + 1, 1)
+            current_month_end = next_month_start - timedelta(days=1)
             
-            # Generate several monthly periods going back
-            for i in range(6):  # Show 6 recent monthly periods
-                start_date = default_start - timedelta(days=30 * i)
-                end_date = default_end - timedelta(days=30 * i)
-                period_str = f"{start_date.strftime('%m/%d/%Y')} - {end_date.strftime('%m/%d/%Y')}"
+            # Add the current month as the first option
+            current_period_str = f"{current_month_start.strftime('%m/%d/%Y')} - {current_month_end.strftime('%m/%d/%Y')}"
+            pay_periods.append(current_period_str)
+            
+            # Generate previous monthly periods going back
+            for i in range(1, 6):  # Show 5 previous months plus current
+                if current_month_start.month == 1:
+                    prev_month_start = datetime(current_month_start.year - 1, 12, 1)
+                else:
+                    prev_month_start = datetime(current_month_start.year, current_month_start.month - 1, 1)
+                
+                if prev_month_start.month == 12:
+                    next_month_start = datetime(prev_month_start.year + 1, 1, 1)
+                else:
+                    next_month_start = datetime(prev_month_start.year, prev_month_start.month + 1, 1)
+                prev_month_end = next_month_start - timedelta(days=1)
+                
+                period_str = f"{prev_month_start.strftime('%m/%d/%Y')} - {prev_month_end.strftime('%m/%d/%Y')}"
                 pay_periods.append(period_str)
+                
+                # Update for next iteration
+                current_month_start = prev_month_start
         
-        self.pay_period_combo['values'] = pay_periods
+        self.pay_period_combo.configure(values=pay_periods)
         
-        # Set the first (most recent appropriate) period as default
+        # Set the first (current) period as default
         if pay_periods:
             self.pay_period.set(pay_periods[0])
         
@@ -1329,6 +2249,9 @@ class TimeCardGUI:
         
         pay_period = self.pay_period.get()
         if not pay_period or ' - ' not in pay_period:
+            # No pay period selected - show helpful message
+            self.date_combo.configure(values=["Select pay period first"])
+            self.date_combo.set("")
             return
         
         try:
@@ -1345,40 +2268,55 @@ class TimeCardGUI:
                     dates.append(current_date.strftime("%a, %m/%d"))
                 current_date += timedelta(days=1)
             
-            self.date_combo['values'] = dates
+            if dates:
+                self.date_combo.configure(values=dates)
+            else:
+                self.date_combo.configure(values=["No weekdays in period"])
+                self.date_combo.set("")
             
         except ValueError:
-            # If parsing fails, just clear the dates
-            self.date_combo['values'] = []
+            # If parsing fails, show error message
+            self.date_combo.configure(values=["Invalid pay period format"])
+            self.date_combo.set("")
     
-    def on_note_type_change(self, event):
+    def on_main_note_type_change(self, choice):
+        """Handle main form note type change and update batch forms"""
+        # Update main form first
+        self.on_note_type_change(choice)
+        
+        # Update all batch forms to match the main form type
+        if self.batch_mode.get() and hasattr(self, 'batch_forms'):
+            for batch_form in self.batch_forms:
+                if 'vars' in batch_form and 'type' in batch_form['vars']:
+                    batch_form['vars']['type'].set(choice)
+                    # Trigger the batch form's type change
+                    if 'time_frame' in batch_form:
+                        self.on_batch_note_type_change(batch_form['time_frame'], batch_form['vars']['type'])
+    
+    def on_note_type_change(self, choice):
         """Show/hide time fields based on note type"""
-        note_type = self.note_type.get()
+        note_type = choice if choice else self.note_type.get()
+        
+        # Hide all frames first
+        self.time_frame.grid_remove()
+        self.break_only_frame.grid_remove()
         
         if note_type in ['Time Change', 'Missing Punch']:
-            # Show all time fields for time-based overrides
-            self.time_frame.grid()
-            # Show all widgets in time frame
-            for widget in self.time_frame.winfo_children():
-                widget.grid()
+            # Show full time frame with all fields
+            self.time_frame.grid(row=0, column=0, sticky='ew', padx=5, pady=5)
+            # Force update to make sure the frame is visible
+            self.time_fields_container.update_idletasks()
         elif note_type == 'Break Change':
-            # Show time frame but hide Time In/Out, only show Break Minutes
-            self.time_frame.grid()
-            # Hide all widgets first
-            for widget in self.time_frame.winfo_children():
-                widget.grid_remove()
-            # Show only Break Minutes label and entry
-            for widget in self.time_frame.winfo_children():
-                if isinstance(widget, ttk.Label) and widget.cget('text') == 'Break Minutes:':
-                    widget.grid()
-                elif isinstance(widget, ttk.Entry) and widget['textvariable'] == str(self.note_break_minutes):
-                    widget.grid()
-        elif note_type == 'Sick Day':
-            # Hide time frame for sick day
-            self.time_frame.grid_remove()
+            # Show only break minutes frame
+            self.break_only_frame.grid(row=1, column=0, sticky='ew', padx=5, pady=5)
+            # Force update to make sure the frame is visible
+            self.time_fields_container.update_idletasks()
+        elif note_type in ['Sick Day', 'Misc', 'ROE']:
+            # Hide all time fields - both frames remain hidden (only note field needed)
+            pass
         else:
-            # Hide by default
-            self.time_frame.grid_remove()
+            # Hide by default - both frames remain hidden
+            pass
     
     def on_batch_note_type_change(self, time_frame, type_var):
         """Show/hide time fields based on note type for batch forms"""
@@ -1393,25 +2331,24 @@ class TimeCardGUI:
         elif note_type == 'Break Change':
             # Show time frame but hide Time In/Out, only show Break Minutes
             time_frame.grid()
-            # Hide all widgets first
+            
+            # Get all widgets and their original grid info
+            widgets_grid_info = []
             for widget in time_frame.winfo_children():
+                grid_info = widget.grid_info()
+                widgets_grid_info.append((widget, grid_info))
+            
+            # Hide all widgets first
+            for widget, _ in widgets_grid_info:
                 widget.grid_remove()
             
-            # Show only Break Minutes label and entry
-            for widget in time_frame.winfo_children():
-                if isinstance(widget, ttk.Label) and widget.cget('text') == 'Break Minutes:':
-                    widget.grid(row=2, column=0, sticky='w', padx=5, pady=2)
-                elif isinstance(widget, ttk.Entry):
-                    # Check if this is the break minutes entry by checking its grid position
-                    try:
-                        grid_info = widget.grid_info()
-                        if grid_info and grid_info.get('row') == 2:  # Break minutes is on row 2
-                            widget.grid(row=2, column=1, sticky='w', padx=5, pady=2)
-                    except:
-                        # If grid_info fails, check if it's positioned after the label
-                        pass
-        elif note_type == 'Sick Day':
-            # Hide time frame for sick day
+            # Show only Break Minutes label and entry (row=2)
+            for widget, grid_info in widgets_grid_info:
+                if grid_info and grid_info.get('row') == 2:  # Break minutes row
+                    # Restore the widget with its original grid settings
+                    widget.grid(**grid_info)
+        elif note_type in ['Sick Day', 'Misc', 'ROE']:
+            # Hide time frame for note-only types
             time_frame.grid_remove()
         else:
             # Hide by default
@@ -1734,10 +2671,10 @@ class TimeCardGUI:
     def toggle_batch_mode(self):
         """Enable/disable batch mode and show/hide additional forms"""
         if self.batch_mode.get():
-            self.batch_count_entry.config(state='normal')
+            self.batch_count_entry.configure(state='normal')
             self.update_batch_forms()
         else:
-            self.batch_count_entry.config(state='disabled')
+            self.batch_count_entry.configure(state='disabled')
             self.batch_count.set("1")
             
             # Hide the batch container when disabling batch mode
@@ -1750,31 +2687,49 @@ class TimeCardGUI:
     
     def refresh_notes_layout(self):
         """Force immediate refresh of the notes tab layout"""
-        if hasattr(self, 'notes_frame') and hasattr(self, 'notes_canvas'):
-            # Force immediate updates
-            self.batch_forms_container.update_idletasks()
+        if hasattr(self, 'notes_frame'):
+            # Simple refresh for CTkScrollableFrame
             self.notes_frame.update_idletasks()
-            self.notes_canvas.update_idletasks()
-            
-            # Manually trigger the scroll region update
-            self.update_scroll_region()
-            
-            # Force another round of updates
-            self.notes_frame.update_idletasks()
-            self.notes_canvas.update_idletasks()
             self.root.update_idletasks()
-            
-            # Schedule additional updates to ensure everything settles
-            self.root.after(1, self.update_scroll_region)
-            self.root.after(10, lambda: self.notes_canvas.update_idletasks())
-            self.root.after(50, lambda: self.root.update_idletasks())
     
     def force_aggressive_layout_reset(self):
         """Simple layout refresh"""
-        if hasattr(self, 'notes_frame') and hasattr(self, 'notes_canvas'):
+        if hasattr(self, 'notes_frame'):
             # Simple refresh approach
             self.notes_frame.update_idletasks()
-            self.update_scroll_region()
+    
+    def force_comprehensive_refresh(self):
+        """Force comprehensive refresh for large batch operations"""
+        try:
+            # Update the scrollable frame
+            if hasattr(self, 'notes_frame'):
+                self.notes_frame.update_idletasks()
+                self.notes_frame.update()
+            
+            # Update the main root window
+            self.root.update_idletasks()
+            self.root.update()
+            
+            # Force the tabview to refresh
+            if hasattr(self, 'tabview'):
+                self.tabview.update_idletasks()
+                self.tabview.update()
+            
+            # Small delay to allow GUI to catch up
+            self.root.after(50, self._final_refresh_step)
+            
+        except Exception as e:
+            # If refresh fails, just log it and continue
+            print(f"Refresh error: {e}")
+    
+    def _final_refresh_step(self):
+        """Final refresh step after delay"""
+        try:
+            if hasattr(self, 'notes_frame'):
+                self.notes_frame.update_idletasks()
+            self.root.update_idletasks()
+        except Exception:
+            pass  # Ignore any refresh errors
     
     def on_batch_count_change(self, event=None):
         """Handle batch count changes from user input"""
@@ -1807,6 +2762,14 @@ class TimeCardGUI:
         # Check if we're going to count = 1 (special handling needed)
         going_to_one = (count == 1)
         
+        # Preserve existing batch form data before clearing
+        existing_data = []
+        if hasattr(self, 'batch_forms'):
+            for i, batch_form in enumerate(self.batch_forms):
+                if 'vars' in batch_form:
+                    form_data = self.get_batch_form_data(batch_form)
+                    existing_data.append(form_data)
+        
         # Clear existing batch forms
         self.clear_batch_forms()
         
@@ -1825,6 +2788,11 @@ class TimeCardGUI:
             for i in range(count - 1):
                 is_last_form = (i == count - 2)  # Last batch form
                 batch_form = self.create_batch_form(i + 2, current_employee, is_last_form)  # Start from 2 since main is 1
+                
+                # Restore data if it exists for this form
+                if i < len(existing_data) and existing_data[i]:
+                    self.restore_batch_form_data(batch_form, existing_data[i])
+                
                 self.batch_forms.append(batch_form)
         else:
             # Hide the batch container when empty (count = 1)
@@ -1850,108 +2818,112 @@ class TimeCardGUI:
     def create_batch_form(self, form_number, default_employee="", is_last_form=False):
         """Create a single batch form"""
         # Create batch form frame in the dedicated container
-        batch_frame = ttk.LabelFrame(self.batch_forms_container, text=f"Note #{form_number}", padding=10)
+        batch_frame = ctk.CTkFrame(self.batch_forms_container, corner_radius=8)
         batch_frame.pack(fill='x', padx=10, pady=5)
         
         # Create form fields
         form_vars = {}
         
         # Employee selection
-        ttk.Label(batch_frame, text="Employee:").grid(row=0, column=0, sticky='w', padx=5, pady=2)
+        ctk.CTkLabel(batch_frame, text="Employee:").grid(row=0, column=0, sticky='w', padx=5, pady=2)
         form_vars['employee'] = tk.StringVar(value=default_employee)  # Set default employee
-        employee_combo = ttk.Combobox(batch_frame, textvariable=form_vars['employee'], 
-                                     width=30, style='Custom.TCombobox')
+        employee_combo = ctk.CTkComboBox(batch_frame, variable=form_vars['employee'], 
+                                     width=300, state='normal')
         if hasattr(self, 'all_employees'):
-            employee_combo['values'] = self.all_employees
+            employee_combo.configure(values=self.all_employees)
         employee_combo.grid(row=0, column=1, sticky='w', padx=5, pady=2)
         # Disable scroll wheel to prevent accidental changes
         employee_combo.bind('<MouseWheel>', lambda e: 'break')
         
         # Date selection
-        ttk.Label(batch_frame, text="Date:").grid(row=1, column=0, sticky='w', padx=5, pady=2)
+        ctk.CTkLabel(batch_frame, text="Date:").grid(row=1, column=0, sticky='w', padx=5, pady=2)
         form_vars['date'] = tk.StringVar()
-        date_combo = ttk.Combobox(batch_frame, textvariable=form_vars['date'], 
-                                 width=20, state='readonly', style='Custom.TCombobox')
-        if hasattr(self, 'date_combo') and self.date_combo['values']:
-            date_combo['values'] = self.date_combo['values']
+        date_combo = ctk.CTkComboBox(batch_frame, variable=form_vars['date'], 
+                                 width=200, state='readonly')
+        if hasattr(self, 'date_combo'):
+            try:
+                values = self.date_combo.cget('values')
+                if values:
+                    date_combo.configure(values=values)
+            except:
+                pass
         date_combo.grid(row=1, column=1, sticky='w', padx=5, pady=2)
         # Disable scroll wheel to prevent accidental changes
         date_combo.bind('<MouseWheel>', lambda e: 'break')
         
         # Override type
-        ttk.Label(batch_frame, text="Override Type:").grid(row=2, column=0, sticky='w', padx=5, pady=2)
-        form_vars['type'] = tk.StringVar()
-        type_combo = ttk.Combobox(batch_frame, textvariable=form_vars['type'], width=20, 
-                                state='readonly', style='Custom.TCombobox')
-        type_combo['values'] = ('Time Change', 'Break Change', 'Missing Punch', 'Sick Day')
+        ctk.CTkLabel(batch_frame, text="Override Type:").grid(row=2, column=0, sticky='w', padx=5, pady=2)
+        # Inherit override type from main form if set, otherwise default to "Missing Punch"
+        main_form_type = self.note_type.get() if hasattr(self, 'note_type') and self.note_type.get() else "Missing Punch"
+        form_vars['type'] = tk.StringVar(value=main_form_type)
+        type_combo = ctk.CTkComboBox(batch_frame, variable=form_vars['type'], width=200, 
+                                state='readonly', values=('Time Change', 'Break Change', 'Missing Punch', 'Sick Day', 'Misc', 'ROE'),
+                                command=lambda choice: self.on_batch_note_type_change(time_frame, form_vars['type']))
         type_combo.grid(row=2, column=1, sticky='w', padx=5, pady=2)
-        type_combo.bind('<<ComboboxSelected>>', lambda e: self.on_batch_note_type_change(time_frame, form_vars['type']))
         # Disable scroll wheel to prevent accidental changes
         type_combo.bind('<MouseWheel>', lambda e: 'break')
         
         # Time fields
-        time_frame = ttk.Frame(batch_frame)
+        time_frame = ctk.CTkFrame(batch_frame, fg_color="transparent", border_width=1, border_color="gray")
         time_frame.grid(row=3, column=0, columnspan=2, sticky='ew', pady=5)
         
         # Time In
-        ttk.Label(time_frame, text="Time In:").grid(row=0, column=0, sticky='w', padx=5, pady=2)
-        time_in_frame = ttk.Frame(time_frame)
+        ctk.CTkLabel(time_frame, text="Time In:").grid(row=0, column=0, sticky='w', padx=5, pady=2)
+        time_in_frame = ctk.CTkFrame(time_frame, fg_color="transparent")
         time_in_frame.grid(row=0, column=1, sticky='w', padx=5, pady=2)
         
         form_vars['time_in_time'] = tk.StringVar(value="__:__")
-        time_in_entry = ttk.Entry(time_in_frame, textvariable=form_vars['time_in_time'], width=8)
+        time_in_entry = ctk.CTkEntry(time_in_frame, textvariable=form_vars['time_in_time'], width=80)
         time_in_entry.pack(side='left', padx=(0,2))
         time_in_entry.bind('<KeyPress>', lambda e: self.on_time_key_press(e, form_vars['time_in_time']))
         time_in_entry.bind('<FocusOut>', lambda e: self.on_time_focus_out_smart_batch(form_vars['time_in_time'], form_vars))
         time_in_entry.bind('<Button-1>', lambda e: self.on_time_click(e, form_vars['time_in_time']))
         
         form_vars['time_in_ampm'] = tk.StringVar(value="AM")
-        time_in_ampm = ttk.Combobox(time_in_frame, textvariable=form_vars['time_in_ampm'], width=4, state='readonly')
-        time_in_ampm['values'] = ['AM', 'PM']
+        time_in_ampm = ctk.CTkComboBox(time_in_frame, variable=form_vars['time_in_ampm'], width=50, values=['AM', 'PM'], state='readonly',
+                                     command=lambda choice: self.root.after(100, lambda: self.calculate_batch_total_hours(form_vars)))
         time_in_ampm.pack(side='left')
-        # Disable scroll wheel and add calculation trigger
+        # Disable scroll wheel to prevent accidental changes
         time_in_ampm.bind('<MouseWheel>', lambda e: 'break')
-        time_in_ampm.bind('<<ComboboxSelected>>', lambda e: self.root.after(100, lambda: self.calculate_batch_total_hours(form_vars)))
         
         # Time Out
-        ttk.Label(time_frame, text="Time Out:").grid(row=1, column=0, sticky='w', padx=5, pady=2)
-        time_out_frame = ttk.Frame(time_frame)
+        ctk.CTkLabel(time_frame, text="Time Out:").grid(row=1, column=0, sticky='w', padx=5, pady=2)
+        time_out_frame = ctk.CTkFrame(time_frame, fg_color="transparent")
         time_out_frame.grid(row=1, column=1, sticky='w', padx=5, pady=2)
         
         form_vars['time_out_time'] = tk.StringVar(value="__:__")
-        time_out_entry = ttk.Entry(time_out_frame, textvariable=form_vars['time_out_time'], width=8)
+        time_out_entry = ctk.CTkEntry(time_out_frame, textvariable=form_vars['time_out_time'], width=80)
         time_out_entry.pack(side='left', padx=(0,2))
         time_out_entry.bind('<KeyPress>', lambda e: self.on_time_key_press(e, form_vars['time_out_time']))
         time_out_entry.bind('<FocusOut>', lambda e: self.on_time_focus_out_smart_batch(form_vars['time_out_time'], form_vars))
         time_out_entry.bind('<Button-1>', lambda e: self.on_time_click(e, form_vars['time_out_time']))
         
         form_vars['time_out_ampm'] = tk.StringVar(value="PM")
-        time_out_ampm = ttk.Combobox(time_out_frame, textvariable=form_vars['time_out_ampm'], width=4, state='readonly')
-        time_out_ampm['values'] = ['AM', 'PM']
+        time_out_ampm = ctk.CTkComboBox(time_out_frame, variable=form_vars['time_out_ampm'], width=50, values=['AM', 'PM'], state='readonly',
+                                      command=lambda choice: self.root.after(100, lambda: self.calculate_batch_total_hours(form_vars)))
         time_out_ampm.pack(side='left')
-        # Disable scroll wheel and add calculation trigger
+        # Disable scroll wheel to prevent accidental changes
         time_out_ampm.bind('<MouseWheel>', lambda e: 'break')
-        time_out_ampm.bind('<<ComboboxSelected>>', lambda e: self.root.after(100, lambda: self.calculate_batch_total_hours(form_vars)))
         
         # Break Minutes
-        ttk.Label(time_frame, text="Break Minutes:").grid(row=2, column=0, sticky='w', padx=5, pady=2)
+        ctk.CTkLabel(time_frame, text="Break Minutes:").grid(row=2, column=0, sticky='w', padx=5, pady=2)
         form_vars['break_minutes'] = tk.StringVar()
-        ttk.Entry(time_frame, textvariable=form_vars['break_minutes'], width=8).grid(row=2, column=1, sticky='w', padx=5, pady=2)
+        ctk.CTkEntry(time_frame, textvariable=form_vars['break_minutes'], width=80).grid(row=2, column=1, sticky='w', padx=5, pady=2)
         
         # Total Hours (calculated field)
-        ttk.Label(time_frame, text="Total Hours:").grid(row=3, column=0, sticky='w', padx=5, pady=2)
+        ctk.CTkLabel(time_frame, text="Total Hours:").grid(row=3, column=0, sticky='w', padx=5, pady=2)
         form_vars['total_hours'] = tk.StringVar()
-        total_hours_entry = ttk.Entry(time_frame, textvariable=form_vars['total_hours'], width=8, state='readonly')
+        total_hours_entry = ctk.CTkEntry(time_frame, textvariable=form_vars['total_hours'], width=80, state='readonly')
         total_hours_entry.grid(row=3, column=1, sticky='w', padx=5, pady=2)
         
         # Note text
-        ttk.Label(batch_frame, text="Note:").grid(row=4, column=0, sticky='nw', padx=5, pady=2)
+        ctk.CTkLabel(batch_frame, text="Note:").grid(row=4, column=0, sticky='nw', padx=5, pady=2)
         form_vars['note'] = tk.StringVar()
-        ttk.Entry(batch_frame, textvariable=form_vars['note'], width=50).grid(row=4, column=1, sticky='ew', padx=5, pady=2)
+        ctk.CTkEntry(batch_frame, textvariable=form_vars['note'], width=400).grid(row=4, column=1, sticky='ew', padx=5, pady=2)
         
         # Add the Add Note button to the last batch form
         if is_last_form:
-            ttk.Button(batch_frame, text="Add Note", command=self.add_note).grid(row=5, column=1, sticky='w', padx=5, pady=10)
+            ctk.CTkButton(batch_frame, text="Add Note", command=self.add_note).grid(row=5, column=1, sticky='w', padx=5, pady=10)
         
         return {
             'frame': batch_frame,
@@ -1975,7 +2947,13 @@ class TimeCardGUI:
         if self.batch_mode.get() and hasattr(self, 'batch_forms'):
             for batch_form in self.batch_forms:
                 batch_data = self.get_batch_form_data(batch_form)
-                if batch_data:  # Only add if form has data
+                # Check if form has meaningful data before adding
+                has_data = (batch_data['employee'] or 
+                           batch_data['date'] or 
+                           batch_data['type'] or
+                           (batch_data['time_in_time'] and batch_data['time_in_time'] != "__:__") or
+                           (batch_data['time_out_time'] and batch_data['time_out_time'] != "__:__"))
+                if has_data:
                     all_forms.append(batch_data)
         
         notes_added = 0
@@ -1995,7 +2973,9 @@ class TimeCardGUI:
                 'Time Change': 'time_override',
                 'Break Change': 'break_override',
                 'Missing Punch': 'missing_punch_override',
-                'Sick Day': 'sick_day'
+                'Sick Day': 'sick_day',
+                'Misc': 'misc',
+                'ROE': 'roe'
             }
             
             internal_type = type_mapping.get(form_data['type'], form_data['type'])
@@ -2034,16 +3014,10 @@ class TimeCardGUI:
             messagebox.showwarning("No Notes Added", "Please fill in at least one form")
             return
         
-        self.refresh_notes_display()
-        
-        # Show success message
-        if notes_added > 1:
-            messagebox.showinfo("Batch Notes Added", f"Successfully added {notes_added} notes")
-        
         # Clear form after successful add
         self.note_employee.set("")
         self.note_date.set("")
-        self.note_type.set("")
+        self.note_type.set("Missing Punch")  # Reset to default
         self.note_text.set("")
         self.note_time_in_time.set("__:__")
         self.note_time_in_ampm.set("AM")
@@ -2056,7 +3030,21 @@ class TimeCardGUI:
         self.clear_batch_forms()
         self.batch_mode.set(False)
         self.batch_count.set("1")
-        self.batch_count_entry.config(state='disabled')
+        self.batch_count_entry.configure(state='disabled')
+        
+        # Trigger note type change to show correct fields
+        self.on_note_type_change("Missing Punch")
+        
+        # Refresh the notes display and force layout update
+        self.refresh_notes_display()
+        
+        # Force a comprehensive layout refresh for large batch operations
+        if notes_added > 4:
+            self.force_comprehensive_refresh()
+        
+        # Show success message
+        if notes_added > 1:
+            messagebox.showinfo("Batch Notes Added", f"Successfully added {notes_added} notes")
         
     def get_main_form_data(self):
         """Get data from main form"""
@@ -2076,27 +3064,37 @@ class TimeCardGUI:
         """Get data from a batch form"""
         vars_dict = batch_form['vars']
         
-        # Check if form has any meaningful data
-        has_data = (vars_dict['employee'].get() or 
-                   vars_dict['date'].get() or 
-                   vars_dict['type'].get() or
-                   (vars_dict['time_in_time'].get() and vars_dict['time_in_time'].get() != "__:__") or
-                   (vars_dict['time_out_time'].get() and vars_dict['time_out_time'].get() != "__:__"))
-        
-        if not has_data:
-            return None
-        
+        # Always return data (even if empty) for preservation purposes
         return {
             'employee': vars_dict['employee'].get(),
             'date': vars_dict['date'].get(),
             'type': vars_dict['type'].get(),
-            'time_in_time': vars_dict['time_in_time'].get() if vars_dict['time_in_time'].get() != "__:__" else "",
+            'time_in_time': vars_dict['time_in_time'].get(),
             'time_in_ampm': vars_dict['time_in_ampm'].get(),
-            'time_out_time': vars_dict['time_out_time'].get() if vars_dict['time_out_time'].get() != "__:__" else "",
+            'time_out_time': vars_dict['time_out_time'].get(),
             'time_out_ampm': vars_dict['time_out_ampm'].get(),
             'break_minutes': vars_dict['break_minutes'].get(),
             'note': vars_dict['note'].get()
         }
+    
+    def restore_batch_form_data(self, batch_form, form_data):
+        """Restore data to a batch form"""
+        vars_dict = batch_form['vars']
+        
+        # Restore all the data
+        vars_dict['employee'].set(form_data.get('employee', ''))
+        vars_dict['date'].set(form_data.get('date', ''))
+        vars_dict['type'].set(form_data.get('type', ''))
+        vars_dict['time_in_time'].set(form_data.get('time_in_time', '__:__'))
+        vars_dict['time_in_ampm'].set(form_data.get('time_in_ampm', 'AM'))
+        vars_dict['time_out_time'].set(form_data.get('time_out_time', '__:__'))
+        vars_dict['time_out_ampm'].set(form_data.get('time_out_ampm', 'PM'))
+        vars_dict['break_minutes'].set(form_data.get('break_minutes', ''))
+        vars_dict['note'].set(form_data.get('note', ''))
+        
+        # Trigger the type change to show correct fields
+        if 'time_frame' in batch_form and form_data.get('type'):
+            self.on_batch_note_type_change(batch_form['time_frame'], vars_dict['type'])
     
     def validate_form_data(self, form_data):
         """Validate form data and return list of missing required fields"""
@@ -2138,7 +3136,7 @@ class TimeCardGUI:
         self.clear_batch_forms()
         self.batch_mode.set(False)
         self.batch_count.set("1")
-        self.batch_count_entry.config(state='disabled')
+        self.batch_count_entry.configure(state='disabled')
         
         # Show success message
         if notes_added > 1:
@@ -2170,10 +3168,11 @@ class TimeCardGUI:
         self.note_type.set(display_type)
         
         # Trigger the type change to show appropriate fields
-        self.on_note_type_change(None)
+        self.on_note_type_change(display_type)
         
-        # Populate type-specific fields
-        if note.get("type") in ['time_override', 'missing_punch_override']:
+        # Populate type-specific fields (check both internal types and display types)
+        if (note.get("type") in ['time_override', 'missing_punch_override'] or 
+            (note.get("type") == 'Missing Punch' and ('time_in' in note or 'time_out' in note))):
             time_in = note.get('time_in', '')
             time_out = note.get('time_out', '')
             
@@ -2241,7 +3240,10 @@ class TimeCardGUI:
         # Add notes
         for note in self.current_notes["notes"]:
             details = ""
-            if note["type"] in ["time_override", "missing_punch_override"]:
+            # Check if note has explicit details field first (from smart parsing)
+            if note.get('details'):
+                details = note.get('details')
+            elif note["type"] in ["time_override", "missing_punch_override"]:
                 details = f"{note.get('time_in', '')} - {note.get('time_out', '')}"
             elif note["type"] == "break_override":
                 details = f"{note.get('value', '')} min"
@@ -2312,25 +3314,22 @@ class TimeCardGUI:
                 messagebox.showerror("Error", f"Failed to load notes: {str(e)}")
     
     # Processing Methods
-    def add_pdf_files(self):
-        """Add PDF files for processing"""
-        files = filedialog.askopenfilenames(
-            title="Select PDF files",
+    def select_pdf_file(self):
+        """Select a single PDF file for processing"""
+        file_path = filedialog.askopenfilename(
+            title="Select a PDF file",
             filetypes=[("PDF files", "*.pdf")]
         )
         
-        for file in files:
-            self.file_listbox.insert(tk.END, file)
+        if file_path:
+            self.selected_pdf_file = file_path
+            filename = Path(file_path).name
+            self.selected_file_label.configure(text=f"Selected: {filename}", text_color="white")
     
-    def remove_pdf_file(self):
-        """Remove selected PDF file"""
-        selection = self.file_listbox.curselection()
-        if selection:
-            self.file_listbox.delete(selection[0])
-    
-    def clear_pdf_files(self):
-        """Clear all PDF files"""
-        self.file_listbox.delete(0, tk.END)
+    def clear_pdf_file(self):
+        """Clear the selected PDF file"""
+        self.selected_pdf_file = None
+        self.selected_file_label.configure(text="No file selected", text_color="gray")
     
     def browse_output(self):
         """Browse for output directory"""
@@ -2345,14 +3344,13 @@ class TimeCardGUI:
             self.save_settings()
     
     def process_files(self):
-        """Process the selected files"""
+        """Process the selected file"""
         if not self.current_profile:
             messagebox.showwarning("Warning", "Please load a profile first")
             return
         
-        files = list(self.file_listbox.get(0, tk.END))
-        if not files:
-            messagebox.showwarning("Warning", "Please add PDF files to process")
+        if not self.selected_pdf_file:
+            messagebox.showwarning("Warning", "Please select a PDF file to process")
             return
         
         # Get the user-selected output directory
@@ -2379,7 +3377,7 @@ class TimeCardGUI:
         
         try:
             self.progress_var.set("Processing...")
-            self.progress_bar.start()
+            self.progress_bar.set(0.1)
             
             # Import processor directly instead of using subprocess
             try:
@@ -2393,44 +3391,44 @@ class TimeCardGUI:
                 # Import the processor module
                 from timecard_processing.processor import UniversalTimeCardProcessor
                 
-                # Process each file using direct import
-                for i, file_path in enumerate(files):
-                    self.progress_var.set(f"Processing file {i+1} of {len(files)}: {Path(file_path).name}")
-                    self.root.update()  # Update GUI to show progress
-                    
-                    # Create processor instance and process file directly
-                    processor = UniversalTimeCardProcessor(temp_config, temp_notes)
-                    processor.process_file(file_path)
+                # Process the single file using direct import
+                filename = Path(self.selected_pdf_file).name
+                self.progress_var.set(f"Processing file: {filename}")
+                self.root.update()  # Update GUI to show progress
                 
-                self.progress_bar.stop()
+                # Create processor instance and process file directly
+                processor = UniversalTimeCardProcessor(temp_config, temp_notes)
+                processor.process_file(self.selected_pdf_file)
+                
+                self.progress_bar.set(1.0)
                 self.progress_var.set("Processing complete!")
-                messagebox.showinfo("Success", f"All files processed successfully!\n\nOutput saved to: {output_dir}")
+                messagebox.showinfo("Success", f"File processed successfully!\n\nOutput saved to: {output_dir}")
                 
             except ImportError as import_error:
                 # Fallback to subprocess method (for development environment)
                 self.progress_var.set("Using fallback method...")
                 
-                for i, file_path in enumerate(files):
-                    self.progress_var.set(f"Processing file {i+1} of {len(files)}: {Path(file_path).name}")
-                    self.root.update()
-                    
-                    # Build command for subprocess
-                    cmd = [sys.executable, "timecard_processing/processor.py", temp_config, file_path]
-                    if temp_notes:
-                        cmd.extend(["--notes", temp_notes])
-                    
-                    # Run processor as subprocess
-                    result = subprocess.run(cmd, capture_output=True, text=True)
-                    
-                    if result.returncode != 0:
-                        raise Exception(f"Processing failed for {Path(file_path).name}:\n{result.stderr}")
+                filename = Path(self.selected_pdf_file).name
+                self.progress_var.set(f"Processing file: {filename}")
+                self.root.update()
                 
-                self.progress_bar.stop()
+                # Build command for subprocess
+                cmd = [sys.executable, "timecard_processing/processor.py", temp_config, self.selected_pdf_file]
+                if temp_notes:
+                    cmd.extend(["--notes", temp_notes])
+                
+                # Run processor as subprocess
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                
+                if result.returncode != 0:
+                    raise Exception(f"Processing failed for {filename}:\n{result.stderr}")
+                
+                self.progress_bar.set(1.0)
                 self.progress_var.set("Processing complete!")
-                messagebox.showinfo("Success", f"All files processed successfully!\n\nOutput saved to: {output_dir}")
+                messagebox.showinfo("Success", f"File processed successfully!\n\nOutput saved to: {output_dir}")
             
         except Exception as e:
-            self.progress_bar.stop()
+            self.progress_bar.set(0)
             self.progress_var.set("Processing failed")
             messagebox.showerror("Error", f"Processing failed: {str(e)}")
         
@@ -2446,17 +3444,17 @@ class TimeCardGUI:
 
     def filter_employee_dropdown(self, *args):
         """Filter employee dropdown based on typed text"""
-        if not hasattr(self, 'all_employees'):
+        if not hasattr(self, 'all_employees') or not self.all_employees or not self.current_profile:
             return
         
         typed_text = self.note_employee.get().lower()
         if not typed_text:
             # Show all employees if nothing typed
-            self.employee_combo['values'] = self.all_employees
+            self.employee_combo.configure(values=self.all_employees)
         else:
             # Filter employees that contain the typed text
             filtered = [emp for emp in self.all_employees if typed_text in emp.lower()]
-            self.employee_combo['values'] = filtered
+            self.employee_combo.configure(values=filtered)
     
     def on_main_employee_change(self, *args):
         """Update batch forms when main employee changes and control batch mode availability"""
@@ -2465,9 +3463,9 @@ class TimeCardGUI:
         # Enable/disable batch mode based on employee selection
         if hasattr(self, 'batch_mode_checkbox'):
             if current_employee:
-                self.batch_mode_checkbox.config(state='normal')
+                self.batch_mode_checkbox.configure(state='normal')
             else:
-                self.batch_mode_checkbox.config(state='disabled')
+                self.batch_mode_checkbox.configure(state='disabled')
                 # If no employee selected, disable batch mode
                 if self.batch_mode.get():
                     self.batch_mode.set(False)
@@ -2495,8 +3493,8 @@ class TimeCardGUI:
     
     def on_tab_changed(self, event):
         """Remove focus from all widgets when tab changes"""
-        # Simply focus the notebook itself to remove focus from any input fields
-        self.notebook.focus_set()
+        # Simply focus the tabview itself to remove focus from any input fields
+        self.tabview.focus_set()
     
     def cleanup_old_settings(self):
         """Remove old settings file from current directory if it exists"""
@@ -2549,10 +3547,274 @@ class TimeCardGUI:
                 json.dump(settings, f, indent=2)
         except Exception as e:
             print(f"Error saving settings: {e}")
+    
+    def show_smart_notes_help(self):
+        """Show help dialog for smart notes feature."""
+        help_text = """🧠 Smart Notes Parser Help
+
+This feature automatically identifies key payroll terms and creates structured notes.
+
+Supported patterns:
+• Missing Punch: "missed punch", "add X hours", "add one day"
+• Vacation Pay: "vacation pay", "use vacation"
+• ROE: "ROE", "process ROE", "quit last day worked"
+• Time Changes: "8:00 AM - 5:00 PM", "scheduled to work"
+• Sick Days: "sick day", "away until", "off professional development"
+
+Example input:
+"Alina worked 72 hours this pay period
+Kalli – Process ROE Quit last day worked was last day paid
+Shaveta may have missed a punch for a full day please add one day"
+
+The parser will:
+1. Identify employee names
+2. Detect note types (Missing Punch, ROE, etc.)
+3. Extract relevant details (hours, times, dates)
+4. Create structured notes for review
+
+Click "Parse Notes" to analyze your text and preview the results before adding them to your notes list."""
+        
+        messagebox.showinfo("Smart Notes Help", help_text)
+    
+    def parse_smart_notes(self):
+        """Parse the text in the smart notes input and show preview."""
+        text = self.smart_notes_text.get("1.0", "end-1c").strip()
+        
+        # Check if text is just the placeholder
+        placeholder_text = "Example:\nAlina worked 72 hours this pay period\nKalli – Process ROE Quit last day worked was last day paid.\nShaveta may have missed a punch for a full day please add one day if she is missing"
+        if not text or text == placeholder_text:
+            messagebox.showwarning("No Text", "Please enter some text to parse.")
+            return
+        
+        # Check if we have employees loaded
+        has_employees = hasattr(self, 'all_employees') and self.all_employees
+        if not has_employees:
+            result = messagebox.askyesno(
+                "No Profile Loaded", 
+                "No employee profile is currently loaded. Smart parsing works best when it can match names to your employee list.\n\n" +
+                "Would you like to:\n" +
+                "• YES: Continue parsing (employee names will show as detected text)\n" +
+                "• NO: Load a profile first for better name matching"
+            )
+            if not result:
+                return
+        
+        # Update parser with current employee list and profile config
+        if hasattr(self, 'all_employees'):
+            self.note_parser.update_employee_list(self.all_employees)
+        else:
+            self.note_parser.update_employee_list([])
+            
+        if hasattr(self, 'current_profile'):
+            self.note_parser.update_profile_config(self.current_profile)
+        else:
+            self.note_parser.update_profile_config({})
+        
+        # Parse the notes
+        parsed_notes = self.note_parser.parse_notes(text)
+        
+        if not parsed_notes:
+            messagebox.showinfo("No Patterns Found", "No recognizable patterns found in the text. Try adding more specific terms like 'missed punch', 'vacation pay', 'ROE', etc.")
+            return
+        
+        # Show preview dialog with additional context about employee matching
+        self.show_parsed_notes_preview(parsed_notes)
+    
+    def show_parsed_notes_preview(self, parsed_notes):
+        """Show a preview dialog of parsed notes before adding them."""
+        preview_window = ctk.CTkToplevel(self.root)
+        preview_window.title("Smart Notes Preview")
+        preview_window.geometry("800x600")
+        preview_window.transient(self.root)
+        preview_window.grab_set()
+        
+        # Title
+        title_frame = ctk.CTkFrame(preview_window)
+        title_frame.pack(fill='x', padx=10, pady=10)
+        
+        ctk.CTkLabel(title_frame, text="🔍 Parsed Notes Preview", 
+                    font=ctk.CTkFont(size=18, weight="bold")).pack(pady=10)
+        
+        # Count high and low confidence notes
+        high_confidence = sum(1 for note in parsed_notes if note.get('confidence', 0.5) > 0.3)
+        low_confidence = len(parsed_notes) - high_confidence
+        
+        info_text = f"Found {len(parsed_notes)} potential notes. {high_confidence} auto-selected (>30% confidence)."
+        if low_confidence > 0:
+            info_text += f" {low_confidence} low-confidence notes require manual review."
+        
+        ctk.CTkLabel(title_frame, text=info_text,
+                    font=ctk.CTkFont(size=12)).pack()
+        
+        # Scrollable frame for notes
+        scroll_frame = ctk.CTkScrollableFrame(preview_window)
+        scroll_frame.pack(fill='both', expand=True, padx=10, pady=10)
+        
+        # Store checkboxes and note data
+        self.preview_checkboxes = []
+        self.preview_note_data = []
+        
+        for i, note in enumerate(parsed_notes):
+            note_frame = ctk.CTkFrame(scroll_frame)
+            note_frame.pack(fill='x', padx=5, pady=5)
+            
+            # Checkbox and confidence indicator
+            top_frame = ctk.CTkFrame(note_frame, fg_color="transparent")
+            top_frame.pack(fill='x', padx=10, pady=5)
+            
+            # Only auto-select notes with confidence > 30%
+            confidence = note.get('confidence', 0.5)
+            auto_select = confidence > 0.3
+            
+            checkbox_var = tk.BooleanVar(value=auto_select)
+            checkbox = ctk.CTkCheckBox(top_frame, text="", variable=checkbox_var)
+            checkbox.pack(side='left')
+            self.preview_checkboxes.append(checkbox_var)
+            
+            # Confidence indicator
+            confidence_color = "green" if confidence > 0.8 else "orange" if confidence > 0.5 else "red"
+            confidence_text = f"Confidence: {confidence:.0%}"
+            
+            ctk.CTkLabel(top_frame, text=confidence_text, text_color=confidence_color,
+                        font=ctk.CTkFont(size=10)).pack(side='right')
+            
+            # Note details
+            details_frame = ctk.CTkFrame(note_frame, fg_color="transparent")
+            details_frame.pack(fill='x', padx=10, pady=(0, 10))
+            
+            # Employee and type
+            info_text = f"Employee: {note.get('employee', 'Unknown')} | Type: {note.get('type', 'Unknown')}"
+            ctk.CTkLabel(details_frame, text=info_text, font=ctk.CTkFont(weight="bold")).pack(anchor='w')
+            
+            # Original note text
+            ctk.CTkLabel(details_frame, text=f"Note: {note.get('note', '')}", 
+                        wraplength=700).pack(anchor='w', pady=(2, 0))
+            
+            # Show details if available
+            if 'details' in note:
+                ctk.CTkLabel(details_frame, text=f"Details: {note['details']}", 
+                            font=ctk.CTkFont(size=12), text_color="lightblue").pack(anchor='w', pady=(2, 0))
+            
+            # Suggested values (if any)
+            suggestions = []
+            if 'suggested_hours' in note:
+                suggestions.append(f"Hours: {note['suggested_hours']}")
+            if 'suggested_time_in' in note:
+                suggestions.append(f"Time In: {note['suggested_time_in']}")
+            if 'suggested_time_out' in note:
+                suggestions.append(f"Time Out: {note['suggested_time_out']}")
+            if 'suggested_break' in note:
+                suggestions.append(f"Break: {note['suggested_break']} min")
+            if 'suggested_date' in note:
+                suggestions.append(f"Date: {note['suggested_date']}")
+            
+            if suggestions:
+                ctk.CTkLabel(details_frame, text=f"Suggestions: {', '.join(suggestions)}", 
+                            font=ctk.CTkFont(size=10), text_color="gray").pack(anchor='w')
+            
+            self.preview_note_data.append(note)
+        
+        # Buttons
+        button_frame = ctk.CTkFrame(preview_window)
+        button_frame.pack(fill='x', padx=10, pady=10)
+        
+        ctk.CTkButton(button_frame, text="Select All", 
+                     command=lambda: self.toggle_all_preview_notes(True)).pack(side='left', padx=5)
+        
+        ctk.CTkButton(button_frame, text="Select None", 
+                     command=lambda: self.toggle_all_preview_notes(False)).pack(side='left', padx=5)
+        
+        ctk.CTkButton(button_frame, text="Cancel", 
+                     command=preview_window.destroy).pack(side='right', padx=5)
+        
+        ctk.CTkButton(button_frame, text="Add Selected Notes", 
+                     command=lambda: self.add_selected_preview_notes(preview_window)).pack(side='right', padx=5)
+    
+    def toggle_all_preview_notes(self, select_all: bool):
+        """Toggle all checkboxes in the preview."""
+        for checkbox_var in self.preview_checkboxes:
+            checkbox_var.set(select_all)
+    
+    def add_selected_preview_notes(self, preview_window):
+        """Add selected notes from preview to the notes list."""
+        selected_notes = []
+        
+        for i, checkbox_var in enumerate(self.preview_checkboxes):
+            if checkbox_var.get():
+                selected_notes.append(self.preview_note_data[i])
+        
+        if not selected_notes:
+            messagebox.showwarning("No Notes Selected", "Please select at least one note to add.")
+            return
+        
+        # Convert parsed notes to the format expected by the application
+        added_count = 0
+        current_pay_period = self.pay_period.get()
+        
+        for note in selected_notes:
+            try:
+                # Map note types to application types
+                note_type_mapping = {
+                    'Missing Punch': 'Missing Punch',
+                    'Time Change': 'Time Change', 
+                    'ROE': 'ROE',  # ROE notes now have their own type
+                    'Vacation Pay': 'Misc',  # Vacation pay as misc note
+                    'Sick Day': 'Sick Day',
+                    'Misc': 'Misc'  # Misc notes have their own type
+                }
+                
+                app_note = {
+                    "employee": note.get('employee', 'Unknown'),
+                    "date": note.get('suggested_date', ''),  # Will need to be set manually if not detected
+                    "type": note_type_mapping.get(note.get('type'), 'Missing Punch'),
+                    "note": note.get('note', ''),
+                    "pay_period": current_pay_period,
+                    "details": note.get('details', '')
+                }
+                
+                # Add suggested values as additional fields for Time Change notes
+                if note.get('type') == 'Time Change' and 'suggested_time_in' in note:
+                    app_note.update({
+                        "time_in": note.get('suggested_time_in', ''),
+                        "time_out": note.get('suggested_time_out', ''),
+                        "break_minutes": note.get('suggested_break', 30)
+                    })
+                
+                # Add time fields for Missing Punch notes with calculated times
+                elif note.get('type') == 'Missing Punch' and 'suggested_time_in' in note:
+                    app_note.update({
+                        "time_in": note.get('suggested_time_in', ''),
+                        "time_out": note.get('suggested_time_out', ''),
+                        "break_minutes": note.get('suggested_break', 30)
+                    })
+                
+                # Also add break_minutes for Missing Punch if only hours were detected
+                elif note.get('type') == 'Missing Punch' and 'suggested_break' in note:
+                    app_note["break_minutes"] = note.get('suggested_break', 30)
+                
+                # Add to notes list
+                self.current_notes["notes"].append(app_note)
+                added_count += 1
+                
+            except Exception as e:
+                print(f"Error adding note: {e}")
+                continue
+        
+        # Refresh the notes display
+        self.refresh_notes_display()
+        
+        # Close preview window
+        preview_window.destroy()
+        
+        # Clear the smart notes text
+        self.smart_notes_text.delete("1.0", "end")
+        
+        # Show success message
+        messagebox.showinfo("Notes Added", f"Successfully added {added_count} notes from smart parsing!")
 
 def main():
-    root = tk.Tk()
-    app = TimeCardGUI(root)
+    root = ctk.CTk()
+    app = XelifyGUI(root)
     root.mainloop()
 
 if __name__ == "__main__":

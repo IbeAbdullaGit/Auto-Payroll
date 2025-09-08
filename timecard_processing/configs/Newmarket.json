@@ -1,0 +1,90 @@
+{
+  "company_name": "Newmarket",
+  "file_type": "pdf",
+  "output_directory": "output_newmarket",
+  "daily_hour_cap": 8.0,
+  "rounding_rules": {
+    "interval_minutes": 15,
+    "threshold_minutes": 8
+  },
+  "break_config": {
+    "break_rules": {
+      "minimum_hours_for_break": 6.0,
+      "long_day_threshold": 9.0,
+      "full_day_break": 60,
+      "long_day_break": 60
+    },
+    "employee_breaks": {
+      "A, Susan": 60,
+      "Arora, Risha": 60,
+      "Baglioni, Alessia": 60,
+      "Bakshi, Anu": 60,
+      "Bhatti, Sonia": 60,
+      "Bristol, Alicia": 60,
+      "Cawte, Deanna": 60,
+      "Doucette, Jody": 60,
+      "GAL, LILLIAN": 60,
+      "Gharajeh, Yashar": 60,
+      "Gois, Mel": 60,
+      "Hines, Dwayne": 30,
+      "Houle, Francine": 30,
+      "Izhar, Nosheen": 60,
+      "Jadeja, Mohini": 60,
+      "Kaur, Nimratpal": 60,
+      "Kaur, Tahzeeb": 60,
+      "Kopitoski, Kila": 60,
+      "Lemelin, Samantha": 60,
+      "Liang, Mia (Juan)": 60,
+      "Lightfoot, Arlene": 60,
+      "Ligia (Ellen), Elena": 60,
+      "Lu, Adelle J": 60,
+      "Marisi, Iris": 60,
+      "Mohammad, Maha": 60,
+      "One, Party Card": 60,
+      "Persuad, Jehana": 60,
+      "Ritchie, Katie": 60,
+      "Robb, Adelina": 30,
+      "Rodriguez, Lisandra": 60,
+      "Ross, Aimee": 60,
+      "Sandhu, Dolly": 60,
+      "Shaveta, Shaveta": 60,
+      "Signh, Akashdeep": 60,
+      "Singh, Paul": 60,
+      "Skelcher, Bernice": 60,
+      "Sumanpreet, Sumanpreet": 60,
+      "Trujillo, Karla": 60,
+      "Vovk- Gamez, Susana": 60,
+      "Williams, Porsche": 60,
+      "Xing LI, Ming": 60,
+      "Yu, Michelle": 60,
+      "Zhang, Hillary (Xiwei)": 15,
+      "Horrocks, Renee": 30,
+      "Alves, Ana": 60,
+      "Card, Supply": 15,
+      "Olanrewaju, Tobi": 60,
+      "Singh, Amrit": 60,
+      "Williams, Kalli-Lyn": 60,
+      "Tsangari, Vagia": 60,
+      "Dibaji, Tara": 60,
+      "Sharma, Shaveta": 60
+    },
+    "employee_hour_thresholds": {
+      "Zhang, Hillary (Xiwei)": 6.0,
+      "Hines, Dwayne": 6.0,
+      "Houle, Francine": 6.0,
+      "Robb, Adelina": 6.0,
+      "Gois, Mel": 6.0,
+      "Card, Supply": 6.0,
+      "Horrocks, Renee": 6.0
+    }
+  },
+  "excel_config": {
+    "format": "standard",
+    "columns": {
+      "employee_name": "Employee Name",
+      "date": "Date",
+      "time_in": "Time In",
+      "time_out": "Time Out"
+    }
+  }
+}

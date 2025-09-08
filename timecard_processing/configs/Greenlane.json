@@ -1,0 +1,141 @@
+{
+  "company_name": "Greenlane",
+  "file_type": "pdf",
+  "output_directory": "output_greenlane",
+  "daily_hour_cap": 8.0,
+  "rounding_rules": {
+    "interval_minutes": 15,
+    "threshold_minutes": 8
+  },
+  "break_config": {
+    "break_rules": {
+      "minimum_hours_for_break": 6.0,
+      "long_day_threshold": 9.0,
+      "full_day_break": 60,
+      "long_day_break": 60
+    },
+    "employee_breaks": {
+      "Abdevali, Shirin": 60,
+      "Ben Ali, Sussan": 30,
+      "Card, Supply": 60,
+      "Dobertin, Verna": 60,
+      "Donville, Rhiana": 60,
+      "Ferguson, Kim": 60,
+      "Greben, Lyudmyla": 60,
+      "Han, Laura": 60,
+      "He, Verna": 60,
+      "Huang, Jane": 30,
+      "Jackson, Nancy": 0,
+      "Khakwani, Mehreen": 0,
+      "Lupo, Marina": 0,
+      "Mohamed, Mrwa": 60,
+      "Okokpujie, Joy": 60,
+      "Safari, Sherry": 60,
+      "Skotarenko, Amanda": 60,
+      "Sohaib, Shafaq": 60,
+      "Tajzadeh, Shokouh": 60,
+      "Vail, Marie": 60,
+      "Wood, Natalie": 60,
+      "Yan, Venus": 0,
+      "Dibella, Stephanie": 0,
+      "Supply Card, Kresty": 60,
+      "Figuera, Grecia": 60,
+      "Gillard, Jorja": 60,
+      "Das, Megha": 60,
+      "Naccarato, Alexia": 60,
+      "Pooja, Pooja": 60,
+      "Dorsey, Leanne": 60,
+      "Delmas, Faith": 60,
+      "Ben Ali, Saoussen": 60,
+      "Abdeali, Zahra": 60
+    },
+    "employee_hour_thresholds": {
+      "Yan, Venus": 6.0,
+      "Han, Laura": 6.0,
+      "Huang, Jane": 0.0,
+      "Ben Ali, Sussan": 0.0,
+      "Lupo, Marina": 6.0,
+      "Khakwani, Mehreen": 6.0,
+      "Greben, Lyudmyla": 7.0,
+      "Dibella, Stephanie": 8.0,
+      "Jackson, Nancy": 0.0,
+      "Pooja, Pooja": 7.0
+    },
+    "fixed_hours_employees": {
+      "Yan, Venus": 6.0,
+      "Jackson, Nancy": 4.0,
+      "Huang, Jane": 6.5
+    },
+    "escalating_breaks": {
+      "Huang, Jane": {
+        "thresholds": [
+          {
+            "hours": 7.0,
+            "break_minutes": 60
+          },
+          {
+            "hours": 6.0,
+            "break_minutes": 30
+          }
+        ]
+      },
+      "Ben Ali, Sussan": {
+        "thresholds": [
+          {
+            "hours": 7.0,
+            "break_minutes": 60
+          },
+          {
+            "hours": 6.0,
+            "break_minutes": 30
+          }
+        ]
+      },
+      "Lupo, Marina": {
+        "thresholds": [
+          {
+            "hours": 7.0,
+            "break_minutes": 60
+          },
+          {
+            "hours": 6.0,
+            "break_minutes": 0
+          }
+        ]
+      },
+      "Khakwani, Mehreen": {
+        "thresholds": [
+          {
+            "hours": 7.0,
+            "break_minutes": 60
+          },
+          {
+            "hours": 6.0,
+            "break_minutes": 0
+          }
+        ]
+      },
+      "Greben, Lyudmyla": {
+        "thresholds": [
+          {
+            "hours": 7.0,
+            "break_minutes": 60
+          },
+          {
+            "hours": 6.0,
+            "break_minutes": 0
+          }
+        ]
+      }
+    }
+  },
+  "excel_config": {
+    "format": "standard",
+    "columns": {
+      "employee_name": "Employee Name",
+      "date": "Date",
+      "time_in": "Time In",
+      "time_out": "Time Out"
+    }
+  }
+}

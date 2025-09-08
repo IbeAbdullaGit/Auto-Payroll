@@ -1,0 +1,46 @@
+{
+  "company_name": "Vaughan",
+  "file_type": "pdf",
+  "output_directory": "output_vaughan",
+  "daily_hour_cap": 8.0,
+  "rounding_rules": {
+    "interval_minutes": 15,
+    "threshold_minutes": 8
+  },
+  "break_config": {
+    "break_rules": {
+      "minimum_hours_for_break": 6.0,
+      "long_day_threshold": 9.0,
+      "full_day_break": 60,
+      "long_day_break": 60
+    },
+    "employee_breaks": {
+      "Cabrera, Denisse Poblete": 60,
+      "Cimino, Jessica": 60,
+      "Dimple, Dimple": 60,
+      "Jeyakuma, Abisha": 60,
+      "Kaur, Harshpreet": 60,
+      "Kurkis, Tania": 60,
+      "Lumanglas, Vanessa": 60,
+      "Ming Blake, sherriel": 60,
+      "Mullings, Natalya": 60,
+      "Njeri, Rosemary": 60,
+      "Omar, Shukria": 30,
+      "S, Leanne": 60,
+      "Van Le, Quynh (Levy)": 60,
+      "Kaur, Sarbjeet": 60
+    },
+    "employee_hour_thresholds": {
+      "Omar, Shukria": 6.0
+    }
+  },
+  "excel_config": {
+    "format": "standard",
+    "columns": {
+      "employee_name": "Employee Name",
+      "date": "Date",
+      "time_in": "Time In",
+      "time_out": "Time Out"
+    }
+  }
+}
