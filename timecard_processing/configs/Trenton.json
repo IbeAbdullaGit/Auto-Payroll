@@ -1,0 +1,49 @@
+{
+  "company_name": "Trenton",
+  "file_type": "pdf",
+  "output_directory": "output_trenton",
+  "daily_hour_cap": 8.0,
+  "rounding_rules": {
+    "interval_minutes": 15,
+    "threshold_minutes": 8
+  },
+  "break_config": {
+    "break_rules": {
+      "minimum_hours_for_break": 6.0,
+      "long_day_threshold": 9.0,
+      "full_day_break": 60,
+      "long_day_break": 60
+    },
+    "employee_breaks": {
+      "Arbuckle, Jennfier": 60,
+      "Ashfeild, Densie": 60,
+      "Blakey, Emily": 60,
+      "Curran, Sarah": 60,
+      "Durant, Amanda": 60,
+      "Farrell, Dawn": 60,
+      "Harron, Reanna": 60,
+      "Hernandez, Brenda": 60,
+      "Hishon, Tara": 60,
+      "Holland, Grace": 60,
+      "House-Adair, Alyssa": 60,
+      "Kapoor, Supreet": 60,
+      "Khamar, Ankitaben": 60,
+      "Leaver, Deseray": 60,
+      "Levick, Hailey": 60,
+      "Loosemore, Abeleina": 60,
+      "Nivison, Tori": 60,
+      "Thompson, Cassidy": 60,
+      "Whittington, Ally": 60
+    },
+    "employee_hour_thresholds": {}
+  },
+  "excel_config": {
+    "format": "standard",
+    "columns": {
+      "employee_name": "Employee Name",
+      "date": "Date",
+      "time_in": "Time In",
+      "time_out": "Time Out"
+    }
+  }
+}

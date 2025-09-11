@@ -125,6 +125,24 @@ class UniversalTimeCardProcessor:
         mins = minutes % 60
         return f"{hours:02d}:{mins:02d}"
     
+    def is_system_generated_note(self, note: str) -> bool:
+        """Check if a note is system-generated and should be excluded from highlighting."""
+        note = note.strip()
+        # List of system-generated note patterns
+        system_patterns = [
+            "Fixed",  # "Fixed X hours"
+            "Applied fixed hours",
+            "Capping",  # Daily hour cap messages
+            "Applied break override",
+            "Applied time_override",
+            "Applied missing_punch_override"
+        ]
+        
+        for pattern in system_patterns:
+            if pattern in note:
+                return True
+        return False
+    
     def find_notes_for_employee_date(self, employee_name: str, date: str) -> List[Dict[str, Any]]:
         """Find all notes for a specific employee and date."""
         matching_notes = []
@@ -1035,6 +1053,59 @@ class UniversalTimeCardProcessor:
         
         employees_sorted = sorted(employees_with_hours, key=lambda emp: get_first_name(emp['name']).lower())
         
+        # Helper function to check if employee has notes
+        def employee_has_notes(employee: Dict[str, Any]) -> bool:
+            """Check if an employee has any notes in their time entries."""
+            for entry in employee['time_entries']:
+                notes = entry.get('notes', '').strip()
+                if notes:
+                    return True
+            return False
+        
+        # Helper function to get all unique notes for an employee
+        def get_employee_notes(employee: Dict[str, Any]) -> str:
+            """Get all unique notes for an employee, combined."""
+            all_notes = []
+            for entry in employee['time_entries']:
+                notes = entry.get('notes', '').strip()
+                if notes:
+                    # Split multiple notes and add each unique one
+                    note_parts = [n.strip() for n in notes.split(';') if n.strip()]
+                    for note in note_parts:
+                        if note not in all_notes:
+                            all_notes.append(note)
+            return '; '.join(all_notes)
+        
+        # Helper function to calculate hours with and without notes
+        def calculate_hours_breakdown(employee: Dict[str, Any]) -> tuple:
+            """Calculate total hours with notes, without notes, and verify total."""
+            total_with_notes = 0
+            total_without_notes = 0
+            
+            employee_name = format_name_first_last(employee['name'])
+            self.logger.info(f"Calculating hours breakdown for {employee_name}:")
+            
+            for entry in employee['time_entries']:
+                net_minutes = self.time_to_minutes(entry['net_hours_rounded'])
+                notes = entry.get('notes', '').strip()
+                
+                # Count as "with notes" if it has any notes
+                if notes:
+                    total_with_notes += net_minutes
+                    self.logger.info(f"  {entry['date']}: {entry['net_hours_rounded']} -> WITH notes ('{notes}')")
+                else:
+                    total_without_notes += net_minutes
+                    self.logger.info(f"  {entry['date']}: {entry['net_hours_rounded']} -> WITHOUT notes (no notes)")
+            
+            total_all = total_with_notes + total_without_notes
+            with_notes_time = self.minutes_to_time(total_with_notes)
+            without_notes_time = self.minutes_to_time(total_without_notes)
+            total_time = self.minutes_to_time(total_all)
+            
+            self.logger.info(f"  TOTALS: With={with_notes_time}, Without={without_notes_time}, Total={total_time}")
+            
+            return (with_notes_time, without_notes_time, total_time)
+        
         # Create summary data
         summary_data = []
         detailed_data = []
@@ -1045,13 +1116,49 @@ class UniversalTimeCardProcessor:
             # Format name as First Last for display
             formatted_name = format_name_first_last(emp['name'])
             
+            # Check if employee has notes
+            has_notes = employee_has_notes(emp)
+            employee_notes = get_employee_notes(emp) if has_notes else ""
+            
+            # Debug logging
+            self.logger.info(f"Employee {formatted_name}: has_notes={has_notes}, notes='{employee_notes}'")
+            for entry in emp['time_entries']:
+                notes_raw = entry.get('notes', '')
+                notes_stripped = notes_raw.strip()
+                self.logger.info(f"  - Entry {entry['date']}: raw_notes='{notes_raw}', stripped='{notes_stripped}', has_content={bool(notes_stripped)}")
+            
+            # Calculate hours breakdown
+            hours_with_notes, hours_without_notes, total_verify = calculate_hours_breakdown(emp)
+            
             # Summary row for each employee
-            summary_data.append({
+            summary_row = {
                 'Employee': formatted_name,
                 'Total_Net_Hours': analysis['total_hours_net'],
                 'Total_Break_Hours': analysis['total_break_hours'],
-                'Pay_Period': emp.get('pay_period', '')
-            })
+                'Pay_Period': emp.get('pay_period', ''),
+                'Has_Notes': 'YES' if has_notes else 'NO',
+                'Hours_With_Notes': hours_with_notes if has_notes else '00:00',
+                'Hours_Without_Notes': hours_without_notes,
+                'Total_Verify': total_verify
+            }
+            summary_data.append(summary_row)
+            
+            # If employee has notes, add a notes row right after
+            if has_notes and employee_notes:
+                notes_row = {
+                    'Employee': f"    NOTES: {employee_notes}",
+                    'Total_Net_Hours': '',
+                    'Total_Break_Hours': '',
+                    'Pay_Period': '',
+                    'Has_Notes': '',
+                    'Hours_With_Notes': '',
+                    'Hours_Without_Notes': '',
+                    'Total_Verify': ''
+                }
+                summary_data.append(notes_row)
+                self.logger.info(f"Added notes row for {formatted_name}: '{notes_row['Employee']}'")
+            else:
+                self.logger.info(f"No notes row added for {formatted_name} (has_notes={has_notes}, notes='{employee_notes}')")
             
             # Detailed daily entries for each employee
             for entry in emp['time_entries']:
@@ -1064,19 +1171,92 @@ class UniversalTimeCardProcessor:
                     'Gross_Hours': entry['gross_hours'],
                     'Break_Minutes': entry['break_minutes'],
                     'Net_Hours': entry['net_hours_rounded'],
-                    'Notes': entry.get('notes', '')
+                    'Notes': entry.get('notes', ''),
+                    'Has_Notes': 'YES' if entry.get('notes', '').strip() else 'NO'
                 })
         
-        # Create Excel file with multiple sheets
+        # Create Excel file with multiple sheets and formatting
+        self.logger.info(f"Creating Excel file with {len(summary_data)} summary rows")
+        for i, row in enumerate(summary_data):
+            if 'NOTES:' in str(row.get('Employee', '')):
+                self.logger.info(f"Summary row {i}: NOTES ROW - '{row['Employee']}'")
+            else:
+                self.logger.info(f"Summary row {i}: EMPLOYEE - '{row['Employee']}'")
+        
         with pd.ExcelWriter(summary_path, engine='openpyxl') as writer:
             # Summary sheet
             summary_df = pd.DataFrame(summary_data)
+            
+            # Debug: Check what's actually in the DataFrame
+            self.logger.info("=== DATAFRAME CONTENTS ===")
+            for i, row in summary_df.iterrows():
+                if 'NOTES:' in str(row['Employee']):
+                    self.logger.info(f"DF Row {i}: NOTES ROW - '{row['Employee']}'")
+                else:
+                    self.logger.info(f"DF Row {i}: EMPLOYEE - '{row['Employee']}'")
+            
             summary_df.to_excel(writer, sheet_name='Employee_Summary', index=False, startrow=2)
+            self.logger.info(f"Written {len(summary_df)} rows to Excel summary sheet")
             
             # Add profile name header to summary sheet
             workbook = writer.book
             summary_worksheet = writer.sheets['Employee_Summary']
             summary_worksheet['A1'] = self.company_name
+            
+            # Apply formatting to summary sheet
+            from openpyxl.styles import PatternFill, Font, Alignment
+            
+            # Bright yellow highlight for employees with notes
+            yellow_fill = PatternFill(start_color='FFFF00', end_color='FFFF00', fill_type='solid')
+            # Light gray for notes rows
+            gray_fill = PatternFill(start_color='D3D3D3', end_color='D3D3D3', fill_type='solid')
+            # Bold font for notes
+            bold_font = Font(bold=True)
+            
+            # Get the number of columns in the summary sheet
+            max_col = summary_worksheet.max_column
+            
+            # Apply formatting by reading actual Excel cell values - DIRECT APPROACH
+            self.logger.info(f"Starting Excel formatting - checking actual cell values")
+            
+            # Find the Has_Notes column (column E based on your screenshot)
+            has_notes_col = None
+            for col_idx in range(1, max_col + 1):
+                cell_value = str(summary_worksheet.cell(row=3, column=col_idx).value or '').strip()
+                if cell_value == 'Has_Notes':
+                    has_notes_col = col_idx
+                    self.logger.info(f"Found Has_Notes column at index {col_idx}")
+                    break
+            
+            if has_notes_col:
+                # Check each data row (starting from row 4)
+                for row_idx in range(4, summary_worksheet.max_row + 1):
+                    employee_cell = summary_worksheet.cell(row=row_idx, column=1)  # Column A
+                    has_notes_cell = summary_worksheet.cell(row=row_idx, column=has_notes_col)
+                    
+                    employee_name = str(employee_cell.value or '').strip()
+                    has_notes_value = str(has_notes_cell.value or '').strip().upper()
+                    
+                    self.logger.info(f"Excel Row {row_idx}: Employee='{employee_name}', Has_Notes='{has_notes_value}'")
+                    
+                    if employee_name.startswith('NOTES:'):
+                        # This is a notes row - apply gray background and bold font
+                        self.logger.info(f"  -> Applying gray formatting to NOTES row {row_idx}")
+                        for col_idx in range(1, max_col + 2):
+                            cell = summary_worksheet.cell(row=row_idx, column=col_idx)
+                            cell.fill = gray_fill
+                            cell.font = bold_font
+                    elif has_notes_value == 'YES':
+                        # Simple rule: If Has_Notes column = YES, highlight yellow
+                        self.logger.info(f"  -> HIGHLIGHTING YELLOW: Excel Row {row_idx} Employee='{employee_name}' (Has_Notes=YES)")
+                        for col_idx in range(1, max_col + 2):
+                            cell = summary_worksheet.cell(row=row_idx, column=col_idx)
+                            cell.fill = yellow_fill
+                    else:
+                        # No highlighting
+                        self.logger.info(f"  -> NO highlighting for Excel Row {row_idx} Employee='{employee_name}' (Has_Notes='{has_notes_value}')")
+            else:
+                self.logger.error("Could not find Has_Notes column for highlighting!")
             
             # Detailed daily entries sheet
             detailed_df = pd.DataFrame(detailed_data)
@@ -1085,6 +1265,67 @@ class UniversalTimeCardProcessor:
             # Add profile name header to detailed sheet
             details_worksheet = writer.sheets['Daily_Details']
             details_worksheet['A1'] = self.company_name
+            
+            # Apply formatting to detailed sheet using direct Excel cell reading
+            self.logger.info(f"Starting Daily Details formatting - checking actual cell values")
+            
+            # Find the Has_Notes column in detailed sheet
+            detailed_has_notes_col = None
+            for col_idx in range(1, details_worksheet.max_column + 1):
+                cell_value = str(details_worksheet.cell(row=3, column=col_idx).value or '').strip()
+                if cell_value == 'Has_Notes':
+                    detailed_has_notes_col = col_idx
+                    self.logger.info(f"Found Has_Notes column in Daily Details at index {col_idx}")
+                    break
+            
+            if detailed_has_notes_col:
+                # Check each data row in detailed sheet (starting from row 4)
+                for row_idx in range(4, details_worksheet.max_row + 1):
+                    employee_cell = details_worksheet.cell(row=row_idx, column=1)  # Column A
+                    has_notes_cell = details_worksheet.cell(row=row_idx, column=detailed_has_notes_col)
+                    
+                    employee_name = str(employee_cell.value or '').strip()
+                    has_notes_value = str(has_notes_cell.value or '').strip().upper()
+                    
+                    self.logger.info(f"Daily Details Row {row_idx}: Employee='{employee_name}', Has_Notes='{has_notes_value}'")
+                    
+                    if has_notes_value == 'YES':
+                        # Highlight yellow
+                        self.logger.info(f"  -> HIGHLIGHTING YELLOW: Daily Details Row {row_idx} Employee='{employee_name}' (Has_Notes=YES)")
+                        for col_idx in range(1, details_worksheet.max_column + 2):
+                            cell = details_worksheet.cell(row=row_idx, column=col_idx)
+                            cell.fill = yellow_fill
+                    else:
+                        # No highlighting
+                        self.logger.info(f"  -> NO highlighting for Daily Details Row {row_idx} Employee='{employee_name}' (Has_Notes='{has_notes_value}')")
+            else:
+                self.logger.error("Could not find Has_Notes column in Daily Details for highlighting!")
+            
+            # Auto-adjust column widths and row heights
+            for worksheet in [summary_worksheet, details_worksheet]:
+                for column in worksheet.columns:
+                    max_length = 0
+                    column_letter = column[0].column_letter
+                    for cell in column:
+                        try:
+                            if len(str(cell.value)) > max_length:
+                                max_length = len(str(cell.value))
+                        except:
+                            pass
+                    adjusted_width = min(max_length + 2, 50)  # Cap at 50 characters
+                    worksheet.column_dimensions[column_letter].width = adjusted_width
+                
+                # Ensure notes rows have adequate height and text wrapping
+                for row_idx in range(1, worksheet.max_row + 1):
+                    cell_a = worksheet.cell(row=row_idx, column=1)  # Employee column
+                    if cell_a.value and str(cell_a.value).strip().startswith('NOTES:'):
+                        # This is a notes row - ensure it's visible
+                        worksheet.row_dimensions[row_idx].height = 30  # Make it taller
+                        # Enable text wrapping for all cells in this row
+                        for col_idx in range(1, worksheet.max_column + 1):
+                            cell = worksheet.cell(row=row_idx, column=col_idx)
+                            cell.alignment = Alignment(wrap_text=True, vertical='top')
+                            self.logger.info(f"Applied text wrapping to notes row {row_idx}, column {col_idx}")
         
         self.logger.info(f"Created comprehensive summary: {summary_path}")
     

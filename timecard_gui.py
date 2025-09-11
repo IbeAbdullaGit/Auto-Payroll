@@ -29,6 +29,8 @@ class IntelligentNoteParser:
         self.employee_list = employee_list or []
         # Store profile config for break settings
         self.profile_config = profile_config or {}
+        # Store pay period info for date conversion
+        self.current_pay_period = ""
         
         # Define patterns for different note types
         self.patterns = {
@@ -74,10 +76,15 @@ class IntelligentNoteParser:
             ]
         }
         
-        # Time patterns
+        # Time patterns - support both "9:00 AM" and "9AM" formats
         self.time_pattern = re.compile(r'(\d{1,2}):(\d{2})\s*([ap]m)', re.IGNORECASE)
+        self.time_pattern_simple = re.compile(r'(\d{1,2})\s*([ap]m)', re.IGNORECASE)
+        
+        # Date patterns - support various formats
         self.date_pattern = re.compile(r'(\w{3}),?\s*(\d{1,2})/(\d{1,2})', re.IGNORECASE)
         self.date_pattern2 = re.compile(r'(\w{3}),?\s*(\d{1,2})/(\d{1,2})/(\d{2,4})', re.IGNORECASE)
+        self.date_pattern_simple = re.compile(r'(\w{3})\s+(\d{1,2})(?!\d)', re.IGNORECASE)  # "Aug 5"
+        
         self.hour_pattern = re.compile(r'(\d+)\s*hours?', re.IGNORECASE)
         
         # Enhanced patterns for better name detection - more restrictive
@@ -93,6 +100,57 @@ class IntelligentNoteParser:
     def update_profile_config(self, profile_config):
         """Update the profile configuration for break settings."""
         self.profile_config = profile_config or {}
+    
+    def update_pay_period(self, pay_period):
+        """Update the current pay period for date conversion."""
+        self.current_pay_period = pay_period or ""
+    
+    def convert_to_date_picker_format(self, month_name: str, day: str) -> str:
+        """Convert month name and day to proper date picker format by using the same logic as manual date selection."""
+        from datetime import datetime, timedelta
+        
+        try:
+            # Convert month name to number
+            month_map = {
+                'jan': 1, 'january': 1, 'feb': 2, 'february': 2, 'mar': 3, 'march': 3,
+                'apr': 4, 'april': 4, 'may': 5, 'jun': 6, 'june': 6,
+                'jul': 7, 'july': 7, 'aug': 8, 'august': 8, 'sep': 9, 'september': 9,
+                'oct': 10, 'october': 10, 'nov': 11, 'november': 11, 'dec': 12, 'december': 12
+            }
+            
+            month_key = month_name.lower()[:3]
+            target_month = month_map.get(month_key, 8)
+            target_day = int(day)
+            
+            # Use the exact same logic as update_available_dates_for_notes()
+            if self.current_pay_period and ' - ' in self.current_pay_period:
+                # Parse the pay period dates (same as manual selection)
+                start_str, end_str = self.current_pay_period.split(' - ')
+                start_date = datetime.strptime(start_str, '%m/%d/%Y')
+                end_date = datetime.strptime(end_str, '%m/%d/%Y')
+                
+                # Generate all weekdays in the pay period (same as manual selection)
+                dates = []
+                current_date = start_date
+                while current_date <= end_date:
+                    if current_date.weekday() < 5:  # Only weekdays
+                        dates.append(current_date.strftime("%a, %m/%d"))
+                    current_date += timedelta(days=1)
+                
+                # Look for exact match in the generated dates
+                target_format = f"{target_month}/{target_day}"
+                for date_option in dates:
+                    if date_option.endswith(target_format):
+                        return date_option
+            
+            # Fallback: calculate using current year if no pay period match
+            current_year = datetime.now().year
+            date_obj = datetime(current_year, target_month, target_day)
+            return date_obj.strftime("%a, %m/%d")
+            
+        except (ValueError, KeyError):
+            # Final fallback if all parsing fails
+            return f"Mon, 8/{day}"
     
     def get_employee_break_minutes(self, employee_name):
         """Get the configured break minutes for an employee."""
@@ -502,14 +560,39 @@ class IntelligentNoteParser:
         return notes
     
     def create_missing_punch_note(self, line: str, employee: str) -> Dict[str, Any]:
-        """Create a missing punch note."""
+        """Create a missing punch note with time/date extraction when available."""
         hours = self.extract_hours(line)
         detected_employee = employee or self.extract_employee_name(line) or "Unknown"
         matched_employee = self.find_best_employee_match(detected_employee)
         
+        # Try to extract times and dates first (like time_change_notes does)
+        times = self.time_pattern.findall(line)
+        if not times or len(times) < 2:
+            times_simple = self.time_pattern_simple.findall(line)
+            if times_simple and len(times_simple) >= 2:
+                # Convert simple format to detailed format
+                times = []
+                for hour, ampm in times_simple:
+                    times.append((hour, "00", ampm))  # Add :00 minutes
+        
+        # Try all date patterns
+        dates = self.date_pattern.findall(line)
+        if not dates:
+            dates = self.date_pattern2.findall(line)
+        if not dates:
+            dates_simple = self.date_pattern_simple.findall(line)
+            if dates_simple:
+                # Convert simple date format
+                month, day = dates_simple[0]
+                dates = [(month, day, "")]  # Empty year for now
+        
         # Create better details based on the content
         details = "Missing punch"
-        if hours:
+        if times and len(times) >= 2:
+            time_in = f"{times[0][0]}:{times[0][1]} {times[0][2].upper()}"
+            time_out = f"{times[1][0]}:{times[1][1]} {times[1][2].upper()}"
+            details = f"{time_in} - {time_out}"
+        elif hours:
             details = f"Add {hours} hours"
         elif 'day' in line.lower():
             details = "Add full day"
@@ -524,11 +607,56 @@ class IntelligentNoteParser:
             'details': details
         }
         
+        # Add extracted times if found
+        if times and len(times) >= 2:
+            time_in = f"{times[0][0]}:{times[0][1]} {times[0][2].upper()}"
+            time_out = f"{times[1][0]}:{times[1][1]} {times[1][2].upper()}"
+            note['suggested_time_in'] = time_in
+            note['suggested_time_out'] = time_out
+            
+            # Calculate break based on time range
+            time_in_minutes = int(times[0][0]) * 60 + int(times[0][1])
+            time_out_minutes = int(times[1][0]) * 60 + int(times[1][1])
+            
+            # Handle PM times
+            if times[0][2].upper() == 'PM' and int(times[0][0]) != 12:
+                time_in_minutes += 12 * 60
+            if times[1][2].upper() == 'PM' and int(times[1][0]) != 12:
+                time_out_minutes += 12 * 60
+                
+            # Handle overnight (unlikely but just in case)
+            if time_out_minutes < time_in_minutes:
+                time_out_minutes += 24 * 60
+                
+            total_minutes = time_out_minutes - time_in_minutes
+            total_hours = total_minutes / 60
+            
+            # Break logic: 0 if 6 hours or less, default break if over 6 hours
+            if total_hours <= 6:
+                note['suggested_break'] = 0
+            else:
+                default_break = self.get_employee_break_minutes(matched_employee)
+                note['suggested_break'] = default_break
+        
+        # Add extracted date if found (use date picker format)
+        if dates:
+            if len(dates[0]) == 3 and dates[0][2]:  # Has year
+                note['suggested_date'] = f"{dates[0][0]}, {dates[0][1]}/{dates[0][2]}"
+            elif len(dates[0]) == 4:  # Full date with year
+                note['suggested_date'] = f"{dates[0][0]}, {dates[0][1]}/{dates[0][2]}"
+            else:  # Simple date format like "Aug 5"
+                # Convert to proper date picker format
+                note['suggested_date'] = self.convert_to_date_picker_format(dates[0][0], dates[0][1])
+        
         if hours:
             note['suggested_hours'] = hours
             
-            # Auto-calculate time slots for hours ≤ 8
-            if hours <= 8:
+            # If specific hours are mentioned, set break to 0 (those are final calculated hours)
+            if not (times and len(times) >= 2):  # Only if no time range was found
+                note['suggested_break'] = 0
+            
+            # Auto-calculate time slots for hours ≤ 8 (only if no times were extracted)
+            if hours <= 8 and not (times and len(times) >= 2):
                 # Calculate end time: 9 AM + hours = end time
                 start_hour = 9  # 9 AM
                 end_hour = start_hour + hours
@@ -546,7 +674,8 @@ class IntelligentNoteParser:
                 
                 # Only add break if explicitly mentioned in the line
                 if 'break' in line.lower():
-                    break_match = re.search(r'(\d+)\s*min.*break', line.lower())
+                    # Match various break patterns: "15 mins break", "15 min break", "15 minute break", etc.
+                    break_match = re.search(r'(\d+)\s*(?:mins?|minutes?)\s*break', line.lower())
                     if break_match:
                         break_mins = int(break_match.group(1))
                         note['suggested_break'] = break_mins
@@ -593,8 +722,27 @@ class IntelligentNoteParser:
     def create_time_change_notes(self, line: str, employee: str) -> List[Dict[str, Any]]:
         """Create time change notes from a line with time information."""
         notes = []
+        
+        # Try both time patterns - detailed first, then simple
         times = self.time_pattern.findall(line)
+        if not times or len(times) < 2:
+            times_simple = self.time_pattern_simple.findall(line)
+            if times_simple and len(times_simple) >= 2:
+                # Convert simple format to detailed format
+                times = []
+                for hour, ampm in times_simple:
+                    times.append((hour, "00", ampm))  # Add :00 minutes
+        
+        # Try all date patterns
         dates = self.date_pattern.findall(line)
+        if not dates:
+            dates = self.date_pattern2.findall(line)
+        if not dates:
+            dates_simple = self.date_pattern_simple.findall(line)
+            if dates_simple:
+                # Convert simple date format - need to add current year or make assumption
+                month, day = dates_simple[0]
+                dates = [(month, day, "")]  # Empty year for now
         
         if times and len(times) >= 2:
             # Has time in and time out
@@ -620,32 +768,55 @@ class IntelligentNoteParser:
                 'details': details
             }
             
-            # Extract break information and update details
+            # Calculate break based on time range and mentions
             if 'no break' in line.lower():
                 note['suggested_break'] = 0
                 details += " (No break)"
             elif 'break' in line.lower():
-                break_match = re.search(r'(\d+)\s*min.*break', line.lower())
+                # Match various break patterns: "15 mins break", "15 min break", "15 minute break", etc.
+                break_match = re.search(r'(\d+)\s*(?:mins?|minutes?)\s*break', line.lower())
                 if break_match:
                     break_mins = int(break_match.group(1))
                     note['suggested_break'] = break_mins
                     details += f" ({break_mins}min break)"
             else:
-                # Use employee's configured break time as default
-                note['suggested_break'] = default_break
-                details += f" ({default_break}min break - default)"
+                # Calculate break based on time range
+                time_in_minutes = int(times[0][0]) * 60 + int(times[0][1])
+                time_out_minutes = int(times[1][0]) * 60 + int(times[1][1])
+                
+                # Handle PM times
+                if times[0][2].upper() == 'PM' and int(times[0][0]) != 12:
+                    time_in_minutes += 12 * 60
+                if times[1][2].upper() == 'PM' and int(times[1][0]) != 12:
+                    time_out_minutes += 12 * 60
+                    
+                # Handle overnight (unlikely but just in case)
+                if time_out_minutes < time_in_minutes:
+                    time_out_minutes += 24 * 60
+                    
+                total_minutes = time_out_minutes - time_in_minutes
+                total_hours = total_minutes / 60
+                
+                # Break logic: 0 if 6 hours or less, default break if over 6 hours
+                if total_hours <= 6:
+                    note['suggested_break'] = 0
+                    details += " (0min break - ≤6hrs)"
+                else:
+                    note['suggested_break'] = default_break
+                    details += f" ({default_break}min break - default)"
             
             # Update details with break info
             note['details'] = details
             
-            # Extract date if present
+            # Extract date if present (use date picker format)
             if dates:
-                note['suggested_date'] = f"{dates[0][1]}/{dates[0][2]}"
-            else:
-                # Try the other date pattern
-                dates2 = self.date_pattern2.findall(line)
-                if dates2:
-                    note['suggested_date'] = f"{dates2[0][1]}/{dates2[0][2]}/{dates2[0][3]}"
+                if len(dates[0]) == 3 and dates[0][2]:  # Has year
+                    note['suggested_date'] = f"{dates[0][0]}, {dates[0][1]}/{dates[0][2]}"
+                elif len(dates[0]) == 4:  # Full date with year
+                    note['suggested_date'] = f"{dates[0][0]}, {dates[0][1]}/{dates[0][2]}"
+                else:  # Simple date format like "Aug 5"
+                    # Convert to proper date picker format
+                    note['suggested_date'] = self.convert_to_date_picker_format(dates[0][0], dates[0][1])
             
             notes.append(note)
         
@@ -694,6 +865,7 @@ class XelifyGUI:
         # Initialize data
         self.current_profile = {}
         self.current_notes = {"pay_period": "", "notes": []}
+        self.current_notes_file_path = None  # Track the currently loaded notes file
         
         # Initialize intelligent note parser
         self.note_parser = IntelligentNoteParser()
@@ -3280,6 +3452,9 @@ class XelifyGUI:
                 with open(filename, 'w') as f:
                     json.dump(self.current_notes, f, indent=2)
                 
+                # Track the current notes file path
+                self.current_notes_file_path = filename
+                
                 # Save the directory for next time
                 self.last_notes_directory = str(Path(filename).parent)
                 self.save_settings()
@@ -3302,6 +3477,9 @@ class XelifyGUI:
             try:
                 with open(filename, 'r') as f:
                     self.current_notes = json.load(f)
+                
+                # Track the current notes file path
+                self.current_notes_file_path = filename
                 
                 # Save the directory for next time
                 self.last_notes_directory = str(Path(filename).parent)
@@ -3371,9 +3549,16 @@ class XelifyGUI:
         # Save current notes temporarily if any
         temp_notes = None
         if self.current_notes["notes"]:
-            temp_notes = "temp_notes.json"
-            with open(temp_notes, 'w') as f:
-                json.dump(self.current_notes, f, indent=2)
+            # If we have a current notes file path, use it directly instead of creating a temp file
+            if self.current_notes_file_path and os.path.exists(self.current_notes_file_path):
+                temp_notes = self.current_notes_file_path
+                print(f"Using existing notes file: {temp_notes}")
+            else:
+                # Fallback: create temp file from in-memory notes
+                temp_notes = "temp_notes.json"
+                with open(temp_notes, 'w') as f:
+                    json.dump(self.current_notes, f, indent=2)
+                print(f"Created temporary notes file: {temp_notes}")
         
         try:
             self.progress_var.set("Processing...")
@@ -3437,7 +3622,8 @@ class XelifyGUI:
             try:
                 if os.path.exists(temp_config):
                     os.remove(temp_config)
-                if temp_notes and os.path.exists(temp_notes):
+                # Only remove temp_notes if it's not our current notes file
+                if temp_notes and os.path.exists(temp_notes) and temp_notes != self.current_notes_file_path:
                     os.remove(temp_notes)
             except Exception:
                 pass  # Ignore cleanup errors
@@ -3599,7 +3785,7 @@ Click "Parse Notes" to analyze your text and preview the results before adding t
             if not result:
                 return
         
-        # Update parser with current employee list and profile config
+        # Update parser with current employee list, profile config, and pay period
         if hasattr(self, 'all_employees'):
             self.note_parser.update_employee_list(self.all_employees)
         else:
@@ -3609,6 +3795,11 @@ Click "Parse Notes" to analyze your text and preview the results before adding t
             self.note_parser.update_profile_config(self.current_profile)
         else:
             self.note_parser.update_profile_config({})
+            
+        if hasattr(self, 'pay_period'):
+            self.note_parser.update_pay_period(self.pay_period.get())
+        else:
+            self.note_parser.update_pay_period("")
         
         # Parse the notes
         parsed_notes = self.note_parser.parse_notes(text)
@@ -3753,20 +3944,20 @@ Click "Parse Notes" to analyze your text and preview the results before adding t
         
         for note in selected_notes:
             try:
-                # Map note types to application types
+                # Map note types to application types (must match processor expectations)
                 note_type_mapping = {
-                    'Missing Punch': 'Missing Punch',
-                    'Time Change': 'Time Change', 
-                    'ROE': 'ROE',  # ROE notes now have their own type
-                    'Vacation Pay': 'Misc',  # Vacation pay as misc note
-                    'Sick Day': 'Sick Day',
-                    'Misc': 'Misc'  # Misc notes have their own type
+                    'Missing Punch': 'missing_punch_override',  # Processor expects this exact type
+                    'Time Change': 'time_override',  # Processor expects this exact type
+                    'ROE': 'roe',  # Processor expects lowercase
+                    'Vacation Pay': 'misc',  # Processor expects lowercase
+                    'Sick Day': 'sick_day',  # Processor expects lowercase with underscore
+                    'Misc': 'misc'  # Processor expects lowercase
                 }
                 
                 app_note = {
                     "employee": note.get('employee', 'Unknown'),
                     "date": note.get('suggested_date', ''),  # Will need to be set manually if not detected
-                    "type": note_type_mapping.get(note.get('type'), 'Missing Punch'),
+                    "type": note_type_mapping.get(note.get('type'), 'missing_punch_override'),
                     "note": note.get('note', ''),
                     "pay_period": current_pay_period,
                     "details": note.get('details', '')
@@ -3809,8 +4000,47 @@ Click "Parse Notes" to analyze your text and preview the results before adding t
         # Clear the smart notes text
         self.smart_notes_text.delete("1.0", "end")
         
+        # Auto-save the notes after adding them
+        self.auto_save_notes_after_smart_parse()
+        
         # Show success message
-        messagebox.showinfo("Notes Added", f"Successfully added {added_count} notes from smart parsing!")
+        if self.current_notes_file_path:
+            messagebox.showinfo("Notes Added", f"Successfully added {added_count} notes from smart parsing and saved to current notes file!")
+        else:
+            messagebox.showinfo("Notes Added", f"Successfully added {added_count} notes from smart parsing and saved to new file!")
+
+    def auto_save_notes_after_smart_parse(self):
+        """Automatically save notes after smart parse adds them to the current notes file."""
+        if not self.pay_period.get():
+            # If no pay period is set, we can't auto-save
+            return
+        
+        self.current_notes["pay_period"] = self.pay_period.get()
+        
+        # If we have a currently loaded notes file, save to it
+        if self.current_notes_file_path:
+            filename = self.current_notes_file_path
+        else:
+            # Fallback: create a new file if no file is currently loaded
+            save_dir = getattr(self, 'last_notes_directory', str(self.notes_dir))
+            pay_period = self.pay_period.get().replace('/', '_').replace(' ', '_')
+            filename = os.path.join(save_dir, f"notes_{pay_period}.json")
+            # Update the current file path for future saves
+            self.current_notes_file_path = filename
+        
+        try:
+            # Ensure the directory exists
+            os.makedirs(os.path.dirname(filename), exist_ok=True)
+            
+            # Save the notes to the current file
+            with open(filename, 'w') as f:
+                json.dump(self.current_notes, f, indent=2)
+                
+            print(f"Auto-saved notes to current file: {filename}")
+            
+        except Exception as e:
+            print(f"Auto-save failed: {str(e)}")
+            # Don't show error dialog to user - just log it
 
 def main():
     root = ctk.CTk()
