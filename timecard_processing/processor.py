@@ -678,11 +678,18 @@ class UniversalTimeCardProcessor:
         """Extract time entries from the new format."""
         entries = []
         
-        # Simple approach: make AM/PM fully optional in the pattern
-        # This should catch the Wed, 5/28 case where it's "11:29" without AM
-        pattern = r'(Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s*(\d+/\d+)\s+(\d+:\d+(?:\s*[AP]M)?)\s+(\d+:\d+)(?:\s*[AP]M)?\s+(\d+:\d+(?:\s*[AP]M)?)\s+(\d+:\d+)(?:\s*[AP]M)?\s+(\w+)\s+(\d+:\d+)'
+        # Pattern for normal time entries with valid times
+        pattern = r'(Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s*(\d+/\d+)\s+(\d+:\d+(?:\s*[AP]M)?)\s+(\d+:\d+)(?:\s*[AP]M)?\s+(\d+:\d+(?:\s*[AP]M)?)\s+(\d+:\d+)(?:\s*[AP]M)?\s+(\w+)\s+(\d+:\d+)(?!\s+.*Missing\s+Punch)'
+        
+        # Pattern for missing punch entries - look for "Missing Punch" in the PUNCH INFO column
+        missing_pattern = r'(Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s*(\d+/\d+).*?Missing\s+Punch'
+        
+        # Alternative pattern for missing punch entries where time columns have "Missed" or are empty
+        missing_pattern_alt = r'(Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s*(\d+/\d+)\s+(?:Missed|--|\s*)\s+(?:Missed|--|\s*)\s+(?:Missed|--|\s*)\s+(?:Missed|--|\s*)\s+(\w+)\s+(\d+:\d+)'
         
         matches = re.findall(pattern, text, re.MULTILINE)
+        missing_matches = re.findall(missing_pattern, text, re.MULTILINE)
+        missing_matches_alt = re.findall(missing_pattern_alt, text, re.MULTILINE)
         
         for match in matches:
             day, date, time_in_actual, time_out_actual, time_in_edited, time_out_edited, dept, daily_hours = match
@@ -761,6 +768,86 @@ class UniversalTimeCardProcessor:
             
             self.logger.info(f"Found entry for {employee_name} on {day}, {date}: {time_in} - {time_out} = {net_hours_rounded}")
         
+        # Process missing punch entries (from "Missing Punch" text)
+        for missing_match in missing_matches:
+            day, date = missing_match
+            date_key = f"{day}, {date}"
+            
+            # Check if there's already a note override for this date that addresses the missing punch
+            existing_notes = self.find_notes_for_employee_date(employee_name, date_key)
+            has_recognition_note = any(
+                note.get('type') in ['missing_punch_override', 'time_override'] or
+                'missing' in note.get('note', '').lower() or
+                'punch' in note.get('note', '').lower() or
+                'verify' in note.get('note', '').lower()
+                for note in existing_notes
+            )
+            
+            if has_recognition_note:
+                # There's already a note that recognizes the missing punch, don't add automatic note
+                self.logger.info(f"Skipping automatic missing punch note for {employee_name} on {day}, {date} - existing note already addresses it")
+                continue
+            
+            # Create a missing punch entry with a note
+            missing_note = f"'{employee_name}' missed punch for this '{day}, {date}', verify this"
+            
+            entry = {
+                'date': f"{day}, {date}",
+                'day_of_week': day,
+                'date_only': date,
+                'time_in': 'Missed',
+                'time_out': 'Missed',
+                'gross_hours': '00:00',
+                'break_minutes': 0,
+                'net_hours_rounded': '00:00',
+                'daily_hours_from_pdf': '00:00',
+                'notes': missing_note,
+                'is_complete': False
+            }
+            entries.append(entry)
+            
+            self.logger.info(f"Found missing punch for {employee_name} on {day}, {date}: {missing_note}")
+        
+        # Process alternative missing punch entries (from empty time columns)
+        for missing_match_alt in missing_matches_alt:
+            day, date, dept, daily_hours = missing_match_alt
+            date_key = f"{day}, {date}"
+            
+            # Check if there's already a note override for this date that addresses the missing punch
+            existing_notes = self.find_notes_for_employee_date(employee_name, date_key)
+            has_recognition_note = any(
+                note.get('type') in ['missing_punch_override', 'time_override'] or
+                'missing' in note.get('note', '').lower() or
+                'punch' in note.get('note', '').lower() or
+                'verify' in note.get('note', '').lower()
+                for note in existing_notes
+            )
+            
+            if has_recognition_note:
+                # There's already a note that recognizes the missing punch, don't add automatic note
+                self.logger.info(f"Skipping automatic missing punch note for {employee_name} on {day}, {date} - existing note already addresses it")
+                continue
+            
+            # Create a missing punch entry with a note
+            missing_note = f"'{employee_name}' missed punch for this '{day}, {date}', verify this"
+            
+            entry = {
+                'date': f"{day}, {date}",
+                'day_of_week': day,
+                'date_only': date,
+                'time_in': 'Missed',
+                'time_out': 'Missed',
+                'gross_hours': '00:00',
+                'break_minutes': 0,
+                'net_hours_rounded': '00:00',
+                'daily_hours_from_pdf': daily_hours,
+                'notes': missing_note,
+                'is_complete': False
+            }
+            entries.append(entry)
+            
+            self.logger.info(f"Found missing punch for {employee_name} on {day}, {date}: {missing_note}")
+        
         return entries
     
     def process_excel(self, excel_path: Path) -> List[Dict[str, Any]]:
@@ -806,19 +893,51 @@ class UniversalTimeCardProcessor:
             time_out = str(row[columns['time_out']])
             date = str(row[columns['date']])
             
-            # Apply note overrides FIRST to get the final times to display
-            final_time_in, final_time_out, override_break, override_notes = self.apply_note_overrides(
-                employee_name, date, time_in, time_out, -1
-            )
-            
-            net_hours_rounded, gross_hours, break_minutes, notes = self.calculate_net_hours(
-                time_in, time_out, employee_name, date
-            )
-            
-            # Combine override notes with calculation notes
-            combined_notes = notes
-            if override_notes and notes != override_notes:
-                combined_notes = override_notes if not notes else f"{override_notes}; {notes}"
+            # Check for missing punches in Excel data
+            if (pd.isna(row[columns['time_in']]) or pd.isna(row[columns['time_out']]) or 
+                time_in.lower() in ['nan', 'nat', '', 'missed'] or 
+                time_out.lower() in ['nan', 'nat', '', 'missed']):
+                
+                # Check if there's already a note override for this date that addresses the missing punch
+                existing_notes = self.find_notes_for_employee_date(employee_name, date)
+                has_recognition_note = any(
+                    note.get('type') in ['missing_punch_override', 'time_override'] or
+                    'missing' in note.get('note', '').lower() or
+                    'punch' in note.get('note', '').lower() or
+                    'verify' in note.get('note', '').lower()
+                    for note in existing_notes
+                )
+                
+                if not has_recognition_note:
+                    # No existing recognition note, add automatic missing punch note
+                    missing_note = f"'{employee_name}' missed punch for this '{date}', verify this"
+                    combined_notes = missing_note
+                else:
+                    # There's already a recognition note, skip automatic note
+                    combined_notes = ""
+                    self.logger.info(f"Skipping automatic missing punch note for {employee_name} on {date} - existing note already addresses it")
+                
+                time_in = 'Missed'
+                time_out = 'Missed'
+                net_hours_rounded = '00:00'
+                gross_hours = '00:00'
+                break_minutes = 0
+                final_time_in = 'Missed'
+                final_time_out = 'Missed'
+            else:
+                # Apply note overrides FIRST to get the final times to display
+                final_time_in, final_time_out, override_break, override_notes = self.apply_note_overrides(
+                    employee_name, date, time_in, time_out, -1
+                )
+                
+                net_hours_rounded, gross_hours, break_minutes, notes = self.calculate_net_hours(
+                    time_in, time_out, employee_name, date
+                )
+                
+                # Combine override notes with calculation notes
+                combined_notes = notes
+                if override_notes and notes != override_notes:
+                    combined_notes = override_notes if not notes else f"{override_notes}; {notes}"
             
             employees[employee_name]['time_entries'].append({
                 'date': date,
@@ -887,22 +1006,51 @@ class UniversalTimeCardProcessor:
                 time_out = str(row.get(columns['time_out'], ''))
                 date = str(row.get(columns['date'], ''))
                 
-                if pd.isna(time_in) or pd.isna(time_out):
-                    continue
-                
-                # Apply note overrides FIRST to get the final times to display
-                final_time_in, final_time_out, override_break, override_notes = self.apply_note_overrides(
-                    sheet_name, date, time_in, time_out, -1
-                )
-                
-                net_hours_rounded, gross_hours, break_minutes, notes = self.calculate_net_hours(
-                    time_in, time_out, sheet_name, date
-                )
-                
-                # Combine override notes with calculation notes
-                combined_notes = notes
-                if override_notes and notes != override_notes:
-                    combined_notes = override_notes if not notes else f"{override_notes}; {notes}"
+                # Check for missing punches in Excel data
+                if (pd.isna(row.get(columns['time_in'])) or pd.isna(row.get(columns['time_out'])) or 
+                    time_in.lower() in ['nan', 'nat', '', 'missed'] or 
+                    time_out.lower() in ['nan', 'nat', '', 'missed']):
+                    
+                    # Check if there's already a note override for this date that addresses the missing punch
+                    existing_notes = self.find_notes_for_employee_date(sheet_name, date)
+                    has_recognition_note = any(
+                        note.get('type') in ['missing_punch_override', 'time_override'] or
+                        'missing' in note.get('note', '').lower() or
+                        'punch' in note.get('note', '').lower() or
+                        'verify' in note.get('note', '').lower()
+                        for note in existing_notes
+                    )
+                    
+                    if not has_recognition_note:
+                        # No existing recognition note, add automatic missing punch note
+                        missing_note = f"'{sheet_name}' missed punch for this '{date}', verify this"
+                        combined_notes = missing_note
+                    else:
+                        # There's already a recognition note, skip automatic note
+                        combined_notes = ""
+                        self.logger.info(f"Skipping automatic missing punch note for {sheet_name} on {date} - existing note already addresses it")
+                    
+                    time_in = 'Missed'
+                    time_out = 'Missed'
+                    net_hours_rounded = '00:00'
+                    gross_hours = '00:00'
+                    break_minutes = 0
+                    final_time_in = 'Missed'
+                    final_time_out = 'Missed'
+                else:
+                    # Apply note overrides FIRST to get the final times to display
+                    final_time_in, final_time_out, override_break, override_notes = self.apply_note_overrides(
+                        sheet_name, date, time_in, time_out, -1
+                    )
+                    
+                    net_hours_rounded, gross_hours, break_minutes, notes = self.calculate_net_hours(
+                        time_in, time_out, sheet_name, date
+                    )
+                    
+                    # Combine override notes with calculation notes
+                    combined_notes = notes
+                    if override_notes and notes != override_notes:
+                        combined_notes = override_notes if not notes else f"{override_notes}; {notes}"
                 
                 employee['time_entries'].append({
                     'date': date,
